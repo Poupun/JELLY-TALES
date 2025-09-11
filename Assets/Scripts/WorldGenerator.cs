@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
+using System.Linq;
 // PlantDefinition and PlantDatabase are in global namespace after refactor
 
 public class WorldGenerator : MonoBehaviour
@@ -39,6 +40,9 @@ public class WorldGenerator : MonoBehaviour
     public bool enableChunkPersistence = true;
     [Tooltip("Folder name under persistent data path to store chunk saves.")]
     public string saveFolderName = "ChunkSaves";
+    [Tooltip("Current world name for save isolation - set by WorldLoader")]
+    [System.NonSerialized]
+    public string currentWorldName = "";
     
     [Header("Block Prefab")]
     public GameObject blockPrefab;
@@ -329,7 +333,8 @@ public class WorldGenerator : MonoBehaviour
         {
             EnsureChunksRoot();
             AutoFindPlayer();
-            UpdateStreaming(force: true);
+            // Don't start chunk streaming until InitializeForWorld is called
+            // UpdateStreaming(force: true) will be called by InitializeForWorld
             if (delayPlayerSpawnUntilChunks)
             {
                 StartCoroutine(StartupPlayerGate());
@@ -339,6 +344,9 @@ public class WorldGenerator : MonoBehaviour
         {
             GenerateWorld();
         }
+        
+        // Note: currentWorldName will be set by WorldLoader or GameManager after Start()
+        // Persistence will be properly managed by InitializeForWorld method
     }
     
     void Update()
@@ -1906,10 +1914,15 @@ public class WorldGenerator : MonoBehaviour
             }
             var lp = chunk.WorldToLocal(position);
             chunk.SetLocal(lp.x, lp.y, lp.z, blockType);
-            if (enableChunkPersistence)
+            if (enableChunkPersistence && !string.IsNullOrEmpty(currentWorldName))
             {
                 if (!_chunkEdits.TryGetValue(cc, out var map)) { map = new Dictionary<Vector3Int, BlockType>(); _chunkEdits[cc] = map; }
                 map[position] = blockType;
+                Debug.Log($"WorldGenerator: Recorded block change at {position} to {blockType} in world '{currentWorldName}' (Chunk {cc})");
+            }
+            else
+            {
+                Debug.LogWarning($"WorldGenerator: Block change at {position} NOT recorded - persistence disabled: {!enableChunkPersistence} or world name empty: '{currentWorldName}'");
             }
         }
         else
@@ -2409,9 +2422,18 @@ public class WorldGenerator : MonoBehaviour
         }
     }
 
+    private void OnDestroy()
+    {
+        // Save chunks when WorldGenerator is about to be destroyed (e.g., scene switch)
+        SaveAllLoadedChunks();
+        Debug.Log("WorldGenerator: OnDestroy - saved chunks before destruction");
+    }
+    
     private void OnApplicationQuit()
     {
         if (!enableChunkPersistence) return;
+        if (string.IsNullOrEmpty(currentWorldName)) return; // Can't save without world name
+        
         // Save every loaded chunk's edits to disk
         foreach (var kv in _chunks)
         {
@@ -2559,17 +2581,32 @@ public class WorldGenerator : MonoBehaviour
             yield return null;
         }
 
-        // Optionally snap player to ground
+        // Optionally snap player to ground (only for new worlds without saved player data)
         if (snapPlayerToGroundOnSpawn)
         {
-            var p = player.position;
-            int x = Mathf.FloorToInt(p.x);
-            int z = Mathf.FloorToInt(p.z);
-            int gy = FindHighestSolidYAt(x, z);
-            if (gy >= 0)
+            bool hasSavedPlayerData = false;
+            if (WorldSaveManager.Instance != null)
             {
-                // place a bit above ground to avoid collisions
-                player.position = new Vector3(p.x, gy + 1.6f, p.z);
+                var currentWorld = WorldSaveManager.Instance.GetCurrentWorldData();
+                hasSavedPlayerData = (currentWorld != null && currentWorld.playerPosition != Vector3.zero);
+            }
+            
+            if (!hasSavedPlayerData)
+            {
+                var p = player.position;
+                int x = Mathf.FloorToInt(p.x);
+                int z = Mathf.FloorToInt(p.z);
+                int gy = FindHighestSolidYAt(x, z);
+                if (gy >= 0)
+                {
+                    // place a bit above ground to avoid collisions
+                    player.position = new Vector3(p.x, gy + 1.6f, p.z);
+                    Debug.Log($"WorldGenerator: Player snapped to ground at Y={gy + 1.6f} (new world, no saved position)");
+                }
+            }
+            else
+            {
+                Debug.Log($"WorldGenerator: Player position preserved from save data, skipping ground snap");
             }
         }
 
@@ -2752,17 +2789,129 @@ public class WorldGenerator : MonoBehaviour
     // ---------- Persistence helpers ----------
     private string GetSaveFolderPath()
     {
-        return System.IO.Path.Combine(Application.persistentDataPath, saveFolderName);
+        if (string.IsNullOrEmpty(currentWorldName))
+        {
+            // World name not set yet - this is normal during startup
+            return null; // Return null to disable persistence when world name is not set
+        }
+        
+        // Create world-specific subfolder
+        return System.IO.Path.Combine(Application.persistentDataPath, saveFolderName, currentWorldName);
     }
 
     private string GetChunkSavePath(Vector2Int coord)
     {
-        return System.IO.Path.Combine(GetSaveFolderPath(), $"chunk_{coord.x}_{coord.y}.json");
+        string folderPath = GetSaveFolderPath();
+        if (string.IsNullOrEmpty(folderPath)) return null;
+        return System.IO.Path.Combine(folderPath, $"chunk_{coord.x}_{coord.y}.json");
+    }
+    
+    // Public method to set the world name and clear existing world data
+    public void InitializeForWorld(string worldName)
+    {
+        Debug.Log($"WorldGenerator: Initializing for world '{worldName}' (current: '{currentWorldName}')");
+        
+        // Store the previous world name for saving
+        string previousWorldName = currentWorldName;
+        
+        // Only clear chunks if we're switching to a different world
+        if (!string.IsNullOrEmpty(previousWorldName) && previousWorldName != worldName)
+        {
+            Debug.Log($"WorldGenerator: Switching from '{previousWorldName}' to '{worldName}' - saving current chunks then clearing");
+            // currentWorldName is still set to the previous world for saving
+            SaveAllLoadedChunks(); // Save current world's chunks before clearing
+            ClearAllChunks();
+        }
+        else if (string.IsNullOrEmpty(previousWorldName))
+        {
+            Debug.Log($"WorldGenerator: First world initialization for '{worldName}' - clearing any existing chunks");
+            ClearAllChunks();
+        }
+        else
+        {
+            Debug.Log($"WorldGenerator: Reloading same world '{worldName}' - keeping existing chunks");
+        }
+        
+        // Now set the new world name
+        currentWorldName = worldName;
+        
+        // Re-enable persistence if it was disabled due to missing world name
+        if (!enableChunkPersistence)
+        {
+            Debug.Log("WorldGenerator: Re-enabling chunk persistence now that world name is set");
+            enableChunkPersistence = true;
+        }
+        
+        // Now that world name is set, start chunk streaming if enabled
+        if (useChunkStreaming)
+        {
+            Debug.Log($"WorldGenerator: Starting chunk streaming for world '{worldName}'");
+            UpdateStreaming(force: true);
+        }
+    }
+    
+    // Public method to save all loaded chunks - called by GameManager when saving
+    public void SaveAllLoadedChunks()
+    {
+        if (!enableChunkPersistence) 
+        {
+            Debug.LogWarning($"WorldGenerator: SaveAllLoadedChunks called but persistence disabled");
+            return;
+        }
+        if (string.IsNullOrEmpty(currentWorldName)) 
+        {
+            Debug.LogWarning($"WorldGenerator: SaveAllLoadedChunks called but currentWorldName is empty");
+            return;
+        }
+        
+        int editsCount = _chunkEdits.Values.Sum(dict => dict.Count);
+        Debug.Log($"WorldGenerator: SaveAllLoadedChunks called - {_chunks.Count} loaded chunks, {editsCount} total edits for world '{currentWorldName}'");
+        
+        int savedChunks = 0;
+        foreach (var kv in _chunks)
+        {
+            if (_chunkEdits.TryGetValue(kv.Key, out var edits) && edits.Count > 0)
+            {
+                SaveChunkToDisk(kv.Key);
+                savedChunks++;
+                Debug.Log($"WorldGenerator: Saved chunk {kv.Key} with {edits.Count} edits");
+            }
+        }
+        
+        Debug.Log($"WorldGenerator: Completed saving {savedChunks} chunks with modifications for world '{currentWorldName}'");
+    }
+    
+    private void ClearAllChunks()
+    {
+        int chunksToDelete = _chunks.Count;
+        int editsToDelete = _chunkEdits.Values.Sum(dict => dict.Count);
+        Debug.Log($"WorldGenerator: ClearAllChunks called - clearing {chunksToDelete} chunks and {editsToDelete} edits");
+        
+        // Stop any pending loads
+        _pendingLoads.Clear();
+        _queued.Clear();
+        _loading.Clear();
+        
+        // Destroy existing chunk GameObjects
+        foreach (var chunk in _chunks.Values)
+        {
+            if (chunk?.parentGO != null)
+            {
+                DestroyImmediate(chunk.parentGO);
+            }
+        }
+        
+        // Clear chunk dictionary and edit history
+        _chunks.Clear();
+        _chunkEdits.Clear();
+        
+        Debug.Log($"WorldGenerator: Cleared {chunksToDelete} chunks and {editsToDelete} edits from memory");
     }
 
     private void EnsureSaveFolder()
     {
         var dir = GetSaveFolderPath();
+        if (string.IsNullOrEmpty(dir)) return;
         if (!System.IO.Directory.Exists(dir)) System.IO.Directory.CreateDirectory(dir);
     }
 
@@ -2770,6 +2919,14 @@ public class WorldGenerator : MonoBehaviour
     {
         if (!enableChunkPersistence) return;
         if (!_chunkEdits.TryGetValue(coord, out var map) || map.Count == 0) return;
+        
+        string savePath = GetChunkSavePath(coord);
+        if (string.IsNullOrEmpty(savePath))
+        {
+            Debug.LogWarning($"Cannot save chunk {coord} - world name not set");
+            return;
+        }
+        
         EnsureSaveFolder();
     var data = new ChunkSaveDTO
         {
@@ -2786,17 +2943,25 @@ public class WorldGenerator : MonoBehaviour
         data.changes[i++] = new ChangedCellDTO { x = kv.Key.x, y = kv.Key.y, z = kv.Key.z, t = (int)kv.Value };
         }
         var json = JsonUtility.ToJson(data, false);
-        System.IO.File.WriteAllText(GetChunkSavePath(coord), json);
+        System.IO.File.WriteAllText(savePath, json);
+        Debug.Log($"WorldGenerator: Saved chunk {coord} with {map.Count} changes to {savePath} for world '{currentWorldName}'");
     }
 
     private void LoadChunkFromDiskInto(Vector2Int coord, WorldGeneration.Chunks.Chunk chunk)
     {
         if (!enableChunkPersistence) return;
         var path = GetChunkSavePath(coord);
+        if (string.IsNullOrEmpty(path)) return; // World name not set, can't load
         if (!System.IO.File.Exists(path)) return;
         var json = System.IO.File.ReadAllText(path);
     var data = JsonUtility.FromJson<ChunkSaveDTO>(json);
-        if (data?.changes == null) return;
+        if (data?.changes == null) 
+        {
+            Debug.LogWarning($"WorldGenerator: No changes found in chunk file {path}");
+            return;
+        }
+        
+        Debug.Log($"WorldGenerator: Loading chunk {coord} with {data.changes.Length} changes from {path} for world '{currentWorldName}'");
         foreach (var c in data.changes)
         {
             var wp = new Vector3Int(c.x, c.y, c.z);
