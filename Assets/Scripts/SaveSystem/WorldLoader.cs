@@ -149,10 +149,11 @@ public class WorldLoader : MonoBehaviour
         
         if (worldGenerator != null)
         {
-            Debug.Log($"WorldLoader: Found WorldGenerator, calling InitializeForWorld('{worldData.worldName}')");
+            Debug.Log($"WorldLoader: Found WorldGenerator, setting seed and calling InitializeForWorld('{worldData.worldName}')");
+            // CRITICAL: Set the worldSeed BEFORE initializing to ensure chunks generate with correct seed
+            worldGenerator.worldSeed = worldData.worldSeed;
             // Initialize the world generator for this specific world
             worldGenerator.InitializeForWorld(worldData.worldName);
-            worldGenerator.worldSeed = worldData.worldSeed;
             Debug.Log($"WorldLoader: Completed world initialization - world: {worldData.worldName}, seed: {worldData.worldSeed}");
             
             LoadPlayerPosition(worldData);
@@ -190,10 +191,11 @@ public class WorldLoader : MonoBehaviour
     {
         if (worldGenerator != null)
         {
+            int randomSeed = Random.Range(int.MinValue, int.MaxValue);
+            // CRITICAL: Set the worldSeed BEFORE initializing to ensure chunks generate with correct seed
+            worldGenerator.worldSeed = randomSeed;
             // Initialize for default world
             worldGenerator.InitializeForWorld("DefaultWorld");
-            int randomSeed = Random.Range(int.MinValue, int.MaxValue);
-            worldGenerator.worldSeed = randomSeed;
             
             // Position player at a safe starting height for new worlds
             if (playerTransform == null)

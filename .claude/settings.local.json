@@ -14,7 +14,8 @@
       "Bash(find:*)",
       "mcp__ide__executeCode",
       "Bash(git restore:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "WebSearch"
     ],
     "deny": [
       "mcp__UnityMCP__manage_editor"

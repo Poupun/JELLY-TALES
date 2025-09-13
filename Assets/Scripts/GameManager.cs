@@ -162,9 +162,10 @@ public class GameManager : MonoBehaviour
                 WorldSaveData defaultWorld = WorldSaveManager.Instance.CreateNewWorld("Default World", randomSeed);
                 WorldSaveManager.Instance.LoadWorld(defaultWorld);
                 
+                // CRITICAL: Set the worldSeed BEFORE initializing to ensure chunks generate with correct seed
+                worldGenerator.worldSeed = randomSeed;
                 // Initialize the world generator for this specific world
                 worldGenerator.InitializeForWorld(defaultWorld.worldName);
-                worldGenerator.worldSeed = randomSeed;
                 
                 // Position player at a safe starting height for new worlds
                 GameObject player = GameObject.FindGameObjectWithTag("Player");

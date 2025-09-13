@@ -78,6 +78,8 @@ namespace WorldGeneration.Chunks
                         var t = chunk.GetLocal(x, y, z);
                         if (t == BlockType.Air) continue;
 
+                        // Remove LOD filtering to restore original functionality
+
                         // Local pos of this block's origin (mesh is in chunk parent's local space)
                         Vector3 basePos = new Vector3(x, y, z);
 

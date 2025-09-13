@@ -3,6 +3,10 @@ using System.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 using System.Linq;
+#if UNITY_JOBS
+using Unity.Jobs;
+using Unity.Collections;
+#endif
 // PlantDefinition and PlantDatabase are in global namespace after refactor
 
 public class WorldGenerator : MonoBehaviour
@@ -29,7 +33,12 @@ public class WorldGenerator : MonoBehaviour
     private readonly Queue<Vector2Int> _pendingLoads = new Queue<Vector2Int>();
     private readonly HashSet<Vector2Int> _queued = new HashSet<Vector2Int>();
     private readonly HashSet<Vector2Int> _loading = new HashSet<Vector2Int>();
-    [Min(1)] public int maxChunkLoadsPerFrame = 1;
+    [Min(1)] public int maxChunkLoadsPerFrame = 2;
+    [Header("Performance Optimization")]
+    [Tooltip("Enable async Job System for chunk generation")]
+    public bool useJobSystem = false; // Temporarily disabled
+    [Tooltip("Frame time budget in milliseconds")]
+    [Range(5f, 33f)] public float targetFrameTime = 16.67f;
     [Header("Meshing (Experimental)")]
     [Tooltip("If enabled, build one mesh per chunk instead of instantiating each block GameObject.")]
     public bool useChunkMeshing = true;
@@ -49,9 +58,9 @@ public class WorldGenerator : MonoBehaviour
     
     [Header("Player Spawn Gating")]
     [Tooltip("If enabled, the player GameObject stays inactive until the first center chunk finishes building its mesh.")]
-    public bool delayPlayerSpawnUntilChunks = true;
+    public bool delayPlayerSpawnUntilChunks = false; // Disabled to fix spawn issues
     [Tooltip("After chunks are ready, reposition the player to stand on the highest solid block under them.")]
-    public bool snapPlayerToGroundOnSpawn = true;
+    public bool snapPlayerToGroundOnSpawn = false; // Disabled to avoid spawn issues
     
     [Header("Block Management System")]
     [Tooltip("Block textures and properties are now managed by BlockManager using BlockConfiguration assets. See Assets/Data/Blocks/ folder.")]
@@ -130,7 +139,7 @@ public class WorldGenerator : MonoBehaviour
     [Tooltip("Enable procedural tree generation (advanced)." )]
     public bool enableTrees = true;
     [Tooltip("Average number of trees per chunk (scaled by noise + randomness)." )]
-    [Min(0f)] public float treesPerChunk = 6f;
+    [Min(0f)] public float treesPerChunk = 0.15f;
     [Tooltip("Seed offset for tree placement noise.")]
     public int treeSeedOffset = 98765;
     [Header("Tree Placement")] 
@@ -523,16 +532,20 @@ public class WorldGenerator : MonoBehaviour
                 _lastPlantSizeGrass = plantSizeGrass;
                 RebuildPlantsForAllLoadedChunks();
             }
-            // Start background chunk loads (limited per frame)
+            // Start background chunk loads with frame time budgeting
+            float frameStartTime = Time.realtimeSinceStartup;
             int budget = Mathf.Max(1, maxChunkLoadsPerFrame);
-            while (budget-- > 0 && _pendingLoads.Count > 0)
+            while (budget-- > 0 && _pendingLoads.Count > 0 && 
+                   (Time.realtimeSinceStartup - frameStartTime) * 1000f < targetFrameTime * 0.5f)
             {
                 var next = _pendingLoads.Dequeue();
                 _queued.Remove(next);
                 if (_chunks.ContainsKey(next) || _loading.Contains(next)) continue;
                 // Mark as loading before starting coroutine to avoid races
                 _loading.Add(next);
-                StartCoroutine(LoadChunkRoutine(next));
+                
+                // Use optimized generation to prevent FPS drops
+                StartCoroutine(LoadChunkRoutineOptimized(next));
             }
             // Process a small number of deferred neighbor mesh rebuilds per frame to avoid spikes
             int rebuildBudget = 2;
@@ -1152,9 +1165,43 @@ public class WorldGenerator : MonoBehaviour
     
     private BlockType GenerateSurfaceBlock(Vector3Int worldPos)
     {
-        // Simple height-based surface generation
-        float noise = Mathf.PerlinNoise((worldPos.x + worldSeed) * 0.02f, (worldPos.z + worldSeed) * 0.02f);
-        int surfaceHeight = Mathf.RoundToInt(28 + noise * 6); // Surface around Y=28-34
+        // Debug warning if using default seed (indicates timing issue)
+        if (worldSeed == 12345 && !string.IsNullOrEmpty(currentWorldName))
+        {
+            Debug.LogWarning($"WorldGenerator: Using default seed {worldSeed} for world '{currentWorldName}' - possible timing issue!");
+        }
+        
+        // Plains biome: mostly flat with occasional small hills
+        // Use smaller seed offset to avoid large coordinate values that break Perlin noise
+        float seedOffset = (worldSeed % 10000) * 0.01f;
+        
+        // Base flat terrain with higher default variation
+        float baseX = worldPos.x * 0.008f + seedOffset; // Slightly faster variation for more rolling terrain
+        float baseZ = worldPos.z * 0.008f + seedOffset;
+        float baseNoise = Mathf.PerlinNoise(baseX, baseZ);
+        
+        // Hill detection - smaller but more common hills
+        float hillX = worldPos.x * 0.015f + seedOffset * 1.7f; // Higher frequency for more common hills
+        float hillZ = worldPos.z * 0.015f + seedOffset * 1.7f;
+        float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
+        
+        // Very common hills (lower threshold for more frequent hills)
+        float hillMultiplier = hillNoise > 0.3f ? Mathf.Pow((hillNoise - 0.3f) / 0.7f, 1.2f) : 0f;
+        
+        // Small detail noise for micro-variations
+        float detailX = worldPos.x * 0.05f + seedOffset;
+        float detailZ = worldPos.z * 0.05f + seedOffset;
+        float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
+        
+        // Combine: higher base variation + smaller common hills + details
+        float combinedHeight = 30f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        int surfaceHeight = Mathf.RoundToInt(combinedHeight); // Base Y=25-35, hills up to Y=39
+        
+        // Debug logging disabled to improve performance
+        // if (worldPos.x >= -2 && worldPos.x <= 2 && worldPos.z >= -2 && worldPos.z <= 2 && worldPos.y == surfaceHeight)
+        // {
+        //     Debug.Log($"Plains Terrain - Pos: {worldPos}, baseNoise: {baseNoise:F3}, hillNoise: {hillNoise:F3}, hillMult: {hillMultiplier:F3}, detailNoise: {detailNoise:F3}, height: {surfaceHeight}, seed: {worldSeed}");
+        // }
         
         if (worldPos.y < surfaceHeight - 4) return BlockType.Stone;
         if (worldPos.y < surfaceHeight) return BlockType.Dirt;
@@ -1167,8 +1214,30 @@ public class WorldGenerator : MonoBehaviour
     public int GetColumnTopY(int worldX, int worldZ)
     {
         // Use the same surface generation logic as GenerateSurfaceBlock
-        float noise = Mathf.PerlinNoise((worldX + worldSeed) * 0.02f, (worldZ + worldSeed) * 0.02f);
-        int surfaceHeight = Mathf.RoundToInt(28 + noise * 6); // Surface around Y=28-34
+        // Plains biome: mostly flat with occasional small hills
+        float seedOffset = (worldSeed % 10000) * 0.01f;
+        
+        // Base flat terrain with higher default variation
+        float baseX = worldX * 0.008f + seedOffset; // Slightly faster variation for more rolling terrain
+        float baseZ = worldZ * 0.008f + seedOffset;
+        float baseNoise = Mathf.PerlinNoise(baseX, baseZ);
+        
+        // Hill detection - smaller but more common hills
+        float hillX = worldX * 0.015f + seedOffset * 1.7f; // Higher frequency for more common hills
+        float hillZ = worldZ * 0.015f + seedOffset * 1.7f;
+        float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
+        
+        // Very common hills (lower threshold for more frequent hills)
+        float hillMultiplier = hillNoise > 0.3f ? Mathf.Pow((hillNoise - 0.3f) / 0.7f, 1.2f) : 0f;
+        
+        // Small detail noise for micro-variations
+        float detailX = worldX * 0.05f + seedOffset;
+        float detailZ = worldZ * 0.05f + seedOffset;
+        float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
+        
+        // Combine: higher base variation + smaller common hills + details
+        float combinedHeight = 30f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        int surfaceHeight = Mathf.RoundToInt(combinedHeight);
         return Mathf.Min(worldHeight - 1, surfaceHeight);
     }
 
@@ -1416,6 +1485,201 @@ public class WorldGenerator : MonoBehaviour
         }
 
     _loading.Remove(coord);
+    }
+    
+    private IEnumerator LoadChunkRoutineOptimized(Vector2Int coord)
+    {
+        // No LOD system - always use full detail
+
+        // Create chunk
+        var chunk = new WorldGeneration.Chunks.Chunk(coord, chunkSizeX, worldHeight, chunkSizeZ, _chunksRoot);
+
+        // Use ultra-smooth generation for virtually zero micro-freezes
+        var ultraSmooth = GetComponent<WorldGeneration.Chunks.UltraSmoothChunkGenerator>();
+        if (ultraSmooth != null)
+        {
+            yield return StartCoroutine(ultraSmooth.GenerateChunkUltraSmooth(chunk, coord));
+        }
+        else
+        {
+            var optimizer = GetComponent<WorldGeneration.Chunks.ChunkGenerationOptimizer>();
+            if (optimizer != null)
+            {
+                yield return StartCoroutine(optimizer.GenerateChunkOptimized(chunk, coord));
+            }
+            else
+            {
+                // Fallback to traditional generation with more frequent yields
+                yield return StartCoroutine(GenerateChunkTraditionalOptimized(chunk, coord));
+            }
+        }
+
+        // Apply persisted edits
+        if (enableChunkPersistence)
+        {
+            LoadChunkFromDiskInto(coord, chunk);
+            if (_chunkEdits.TryGetValue(coord, out var edits))
+            {
+                foreach (var kv in edits)
+                {
+                    var lp = chunk.WorldToLocal(kv.Key);
+                    if (lp.x >= 0 && lp.x < chunk.sizeX && lp.y >= 0 && lp.y < chunk.sizeY && lp.z >= 0 && lp.z < chunk.sizeZ)
+                    {
+                        chunk.SetLocal(lp.x, lp.y, lp.z, kv.Value);
+                    }
+                }
+            }
+        }
+
+        // Trees generation
+        if (enableTrees)
+        {
+            _isProceduralBatch = true;
+            _batchDirtyChunks.Clear();
+            yield return GenerateTreesInChunkRoutine(chunk);
+            _isProceduralBatch = false;
+        }
+
+        // Register chunk early
+        _chunks[coord] = chunk;
+
+        // Build mesh with LOD optimization
+        if (useChunkMeshing)
+        {
+            BuildChunkMesh(chunk);
+            
+            // Build plants
+            int usefulY = Mathf.Clamp(chunk.sizeY, 1, worldHeight);
+            BuildChunkPlants(chunk, usefulY);
+            
+            // Handle neighbor rebuilds
+            HandleNeighborRebuilds(coord);
+        }
+        else
+        {
+            // Traditional visible block building with LOD filtering
+            yield return StartCoroutine(BuildVisible(chunk));
+        }
+
+        _loading.Remove(coord);
+    }
+
+    private IEnumerator GenerateChunkWithJobSystem(WorldGeneration.Chunks.Chunk chunk, Vector2Int coord)
+    {
+        // For now, use the optimized fallback system until Unity Jobs package is properly installed
+        yield return StartCoroutine(WorldGeneration.Chunks.ChunkGenerationFallback.GenerateChunkAsync(
+            chunk, coord, chunkSizeX, worldHeight, chunkSizeZ, worldSeed));
+    }
+
+    private IEnumerator GenerateChunkTraditional(WorldGeneration.Chunks.Chunk chunk, Vector2Int coord)
+    {
+        // Original generation logic with yields
+        for (int lx = 0; lx < chunkSizeX; lx++)
+        {
+            for (int lz = 0; lz < chunkSizeZ; lz++)
+            {
+                int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
+                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+                for (int ly = 0; ly <= columnMaxY; ly++)
+                {
+                    var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
+                    chunk.SetLocal(lx, ly, lz, GenerateBlockTypeAt(wp));
+                }
+            }
+            if ((lx & 3) == 0) yield return null;
+        }
+    }
+    
+    private IEnumerator GenerateChunkTraditionalOptimized(WorldGeneration.Chunks.Chunk chunk, Vector2Int coord)
+    {
+        // Optimized generation with more frequent yields to prevent FPS drops
+        float frameStartTime = Time.realtimeSinceStartup;
+        int processedBlocks = 0;
+        
+        for (int lx = 0; lx < chunkSizeX; lx++)
+        {
+            for (int lz = 0; lz < chunkSizeZ; lz++)
+            {
+                int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
+                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+                for (int ly = 0; ly <= columnMaxY; ly++)
+                {
+                    var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
+                    chunk.SetLocal(lx, ly, lz, GenerateBlockTypeAt(wp));
+                    processedBlocks++;
+                    
+                    // Yield very frequently to eliminate micro-freezes
+                    if (processedBlocks >= 50 || (Time.realtimeSinceStartup - frameStartTime) * 1000f > 1f)
+                    {
+                        yield return null;
+                        frameStartTime = Time.realtimeSinceStartup;
+                        processedBlocks = 0;
+                    }
+                    
+                    // Extra yield every 20 blocks for ultra-smooth generation
+                    if (processedBlocks % 20 == 0)
+                    {
+                        yield return null;
+                        frameStartTime = Time.realtimeSinceStartup;
+                    }
+                }
+            }
+        }
+    }
+
+    private void BuildChunkMesh(WorldGeneration.Chunks.Chunk chunk)
+    {
+        // Standard BuildMesh call
+        WorldGeneration.Chunks.ChunkMeshBuilder.BuildMesh(this, chunk, addChunkCollider);
+    }
+
+    private IEnumerator BuildVisible(WorldGeneration.Chunks.Chunk chunk)
+    {
+        int usefulY = Mathf.Clamp(chunk.sizeY, 1, worldHeight);
+        
+        for (int lx = 0; lx < chunkSizeX; lx++)
+        {
+            for (int ly = 0; ly < usefulY; ly++)
+            {
+                for (int lz = 0; lz < chunkSizeZ; lz++)
+                {
+                    var t = chunk.GetLocal(lx, ly, lz);
+                    if (t == BlockType.Air) continue;
+                    
+                    // No LOD filtering - render all blocks
+                    
+                    var wp = new Vector3Int(chunk.coord.x * chunkSizeX + lx, ly, chunk.coord.y * chunkSizeZ + lz);
+                    if (ShouldRenderBlock(wp.x, wp.y, wp.z))
+                    {
+                        CreateBlock(wp, t, chunk.parent);
+                    }
+                }
+            }
+            if ((lx & 3) == 0) yield return null;
+        }
+    }
+
+    private void HandleNeighborRebuilds(Vector2Int coord)
+    {
+        if (_batchDirtyChunks.Count > 0)
+        {
+            foreach (var dc in _batchDirtyChunks)
+            {
+                if (dc != coord)
+                {
+                    _deferredRebuild.Add(dc);
+                }
+            }
+            _batchDirtyChunks.Clear();
+        }
+
+        // Request neighbor chunks to rebuild for proper border culling
+        Vector2Int[] ortho = { new Vector2Int(1,0), new Vector2Int(-1,0), new Vector2Int(0,1), new Vector2Int(0,-1) };
+        foreach (var o in ortho)
+        {
+            var nc = new Vector2Int(coord.x + o.x, coord.y + o.y);
+            if (_chunks.ContainsKey(nc)) _deferredRebuild.Add(nc);
+        }
     }
     
     void UpdateVisibleBlocks()
@@ -2806,6 +3070,19 @@ public class WorldGenerator : MonoBehaviour
         return System.IO.Path.Combine(folderPath, $"chunk_{coord.x}_{coord.y}.json");
     }
     
+    // Public method to clear all chunk data for debugging (useful after fixing seed timing issues)
+    [ContextMenu("Clear All World Chunks")]
+    public void ClearAllWorldChunks()
+    {
+        Debug.Log("WorldGenerator: Manually clearing all world chunks for debugging");
+        ClearAllChunks();
+        WorldSaveManager.Instance?.ClearDefaultChunkData();
+        if (!string.IsNullOrEmpty(currentWorldName))
+        {
+            WorldSaveManager.Instance?.ClearWorldChunkData(currentWorldName);
+        }
+    }
+    
     // Public method to set the world name and clear existing world data
     public void InitializeForWorld(string worldName)
     {
@@ -2845,7 +3122,7 @@ public class WorldGenerator : MonoBehaviour
         // Now that world name is set, start chunk streaming if enabled
         if (useChunkStreaming)
         {
-            Debug.Log($"WorldGenerator: Starting chunk streaming for world '{worldName}'");
+            Debug.Log($"WorldGenerator: Starting chunk streaming for world '{worldName}' with seed {worldSeed}");
             UpdateStreaming(force: true);
         }
     }
