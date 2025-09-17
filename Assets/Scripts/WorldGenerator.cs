@@ -3,6 +3,7 @@ using System.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 using System.Linq;
+using WorldGeneration;
 #if UNITY_JOBS
 using Unity.Jobs;
 using Unity.Collections;
@@ -13,7 +14,7 @@ public class WorldGenerator : MonoBehaviour
 {
     [Header("World Settings")]
     public int worldWidth = 16;
-    public int worldHeight = 16;
+    public int worldHeight = 120;  // 7.5x deeper from 16 for balanced cave systems
     public int worldDepth = 16;
 
     [Header("World Generation")]
@@ -25,7 +26,7 @@ public class WorldGenerator : MonoBehaviour
     public bool useChunkStreaming = true;
     [Min(4)] public int chunkSizeX = 16;
     [Min(4)] public int chunkSizeZ = 16;
-    [Min(1)] public int viewDistanceChunks = 4; // Manhattan or square radius
+    [Min(1)] public int viewDistanceChunks = 6; // Increased for better exploration
     [Tooltip("Player transform used to center chunk streaming. If null, will try to auto-find.")]
     public Transform player;
     private Transform _chunksRoot;
@@ -33,12 +34,12 @@ public class WorldGenerator : MonoBehaviour
     private readonly Queue<Vector2Int> _pendingLoads = new Queue<Vector2Int>();
     private readonly HashSet<Vector2Int> _queued = new HashSet<Vector2Int>();
     private readonly HashSet<Vector2Int> _loading = new HashSet<Vector2Int>();
-    [Min(1)] public int maxChunkLoadsPerFrame = 2;
+    [Min(1)] public int maxChunkLoadsPerFrame = 4; // Increased for faster loading
     [Header("Performance Optimization")]
     [Tooltip("Enable async Job System for chunk generation")]
     public bool useJobSystem = false; // Temporarily disabled
     [Tooltip("Frame time budget in milliseconds")]
-    [Range(5f, 33f)] public float targetFrameTime = 16.67f;
+    [Range(5f, 33f)] public float targetFrameTime = 25f; // Increased budget for chunk loading
     [Header("Meshing (Experimental)")]
     [Tooltip("If enabled, build one mesh per chunk instead of instantiating each block GameObject.")]
     public bool useChunkMeshing = true;
@@ -198,6 +199,27 @@ public class WorldGenerator : MonoBehaviour
     // Safety net: deferred rebuild queue to handle cross-chunk writes even if batching overlaps
     private readonly HashSet<Vector2Int> _deferredRebuild = new HashSet<Vector2Int>();
 
+    [Header("Cave System")]
+    [Tooltip("Enable procedural cave generation underground.")]
+    public bool enableCaves = true;
+    [Tooltip("Cave generation algorithm: Simple (fastest), Advanced (most realistic), Tunnels (balanced).")]
+    public CaveGenerationMode caveMode = CaveGenerationMode.Advanced;
+    [Tooltip("Cave density multiplier (higher = more caves). Affects performance: lower density = faster generation.")]
+    [Range(0.1f, 2f)] public float caveDensity = 0.6f; // Increased for more common caves
+    [Tooltip("Minimum Y level for cave generation. Higher values improve performance.")]
+    [Range(1, 15)] public int minCaveHeight = 1;
+    [Tooltip("Maximum Y level for cave generation. Lower values improve performance.")]
+    [Range(10, 110)] public int maxCaveHeight = 100;
+    [Tooltip("Generate cave entrances at surface level. Disable for underground-only caves.")]
+    public bool enableCaveEntrances = true;
+    
+    public enum CaveGenerationMode
+    {
+        Simple,     // Single noise, fastest
+        Advanced,   // Ridged noise with chambers, most realistic  
+        Tunnels     // Dual noise, balanced
+    }
+
     [Header("Leaf Wind Animation")] 
     [Tooltip("Enable subtle shader-based wind sway for leaf blocks (vertex animation).")]
     public bool enableLeafWind = true;
@@ -268,6 +290,13 @@ public class WorldGenerator : MonoBehaviour
     [Header("Debug / Reload")] 
     [Tooltip("If true, a reload will discard persisted chunk edits (fresh world)." )]
     public bool clearSavedEditsOnReload = false;
+    [Tooltip("Enable cave X-Ray debug system (F3 to toggle in-game).")]
+    public bool enableCaveDebug = true;
+    [Tooltip("Simple cave debug visualization (Press G in-game).")]
+    public bool enableSimpleCaveDebug = true;
+    
+    // Simple debug variables
+    private bool showCaveDebug = false;
     [Tooltip("If true when reloading, a new random seed will be chosen.")]
     public bool reseedOnReload = false;
     [Tooltip("Helper flag you can tick in play mode to trigger a reload; auto-resets.")]
@@ -562,6 +591,13 @@ public class WorldGenerator : MonoBehaviour
                     }
                 }
             }
+        }
+        
+        // Simple cave debug toggle
+        if (enableSimpleCaveDebug && Input.GetKeyDown(KeyCode.G))
+        {
+            showCaveDebug = !showCaveDebug;
+            UnityEngine.Debug.Log($"Simple Cave Debug: {(showCaveDebug ? "ON" : "OFF")}");
         }
     }
 
@@ -1114,50 +1150,77 @@ public class WorldGenerator : MonoBehaviour
         // Bedrock layer (unbreakable foundation)
         if (worldPos.y == 0) return BlockType.Bedrock;
         
-        // Deep underground (Y 1-12) - Stone with ores
-        if (worldPos.y <= 12)
-        {
-            return GenerateUndergroundBlock(worldPos);
-        }
+        BlockType terrainBlock;
         
-        // Underground stone layer (Y 13-25)
-        if (worldPos.y <= 25)
+        // Deep underground (Y 1-30) - Stone with rare ores  
+        if (worldPos.y <= 30)
+        {
+            terrainBlock = GenerateUndergroundBlock(worldPos);
+        }
+        // Mid underground (Y 31-60) - Stone with common ores
+        else if (worldPos.y <= 60)
         {
             // Mix of stone and some ores
             System.Random rng = new System.Random(worldPos.x * 73856093 ^ worldPos.y * 19349663 ^ worldPos.z * 83492791 ^ worldSeed);
             float chance = (float)rng.NextDouble();
             
-            if (chance < 0.05f) return BlockType.Coal;
-            if (chance < 0.08f && worldPos.y <= 20) return BlockType.Iron;
-            if (chance < 0.15f) return BlockType.Gravel;
+            // Reduce ore generation near caves
+            float oreReductionFactor = GetOreReductionNearCaves(worldPos);
             
-            return BlockType.Stone;
+            if (chance < 0.04f * oreReductionFactor) terrainBlock = BlockType.Coal;
+            else if (chance < 0.06f * oreReductionFactor && worldPos.y <= 50) terrainBlock = BlockType.Iron;
+            else if (chance < 0.10f) terrainBlock = BlockType.Gravel;
+            else terrainBlock = BlockType.Stone;
+        }
+        // Upper underground (Y 61-85) - Mostly stone
+        else if (worldPos.y <= 85)
+        {
+            // Mostly stone with very little ore
+            System.Random rng = new System.Random(worldPos.x * 73856093 ^ worldPos.y * 19349663 ^ worldPos.z * 83492791 ^ worldSeed);
+            float chance = (float)rng.NextDouble();
+            
+            if (chance < 0.02f) terrainBlock = BlockType.Coal; // Very rare coal
+            else if (chance < 0.08f) terrainBlock = BlockType.Gravel;
+            else terrainBlock = BlockType.Stone;
+        }
+        // Surface terrain (Y 86+) - Normal surface terrain generation at Y=95-105
+        else
+        {
+            terrainBlock = GenerateSurfaceBlock(worldPos);
         }
         
-        // Surface terrain (Y 26+)
-        return GenerateSurfaceBlock(worldPos);
+        // GLOBAL CAVE CHECK LAST - caves can override ANY terrain including surface
+        if (enableCaves && worldPos.y >= minCaveHeight && worldPos.y <= maxCaveHeight && ShouldGenerateCaveAt(worldPos))
+        {
+            return BlockType.Air;
+        }
+        
+        return terrainBlock;
     }
     
     private BlockType GenerateUndergroundBlock(Vector3Int worldPos)
     {
         System.Random rng = new System.Random(worldPos.x * 73856093 ^ worldPos.y * 19349663 ^ worldPos.z * 83492791 ^ worldSeed);
         float chance = (float)rng.NextDouble();
-        float depthFactor = (13f - worldPos.y) / 13f; // Deeper = rarer ores
+        float depthFactor = (20f - worldPos.y) / 20f; // Deeper = rarer ores (adjusted for Y 1-20 range)
+        
+        // Reduce ore generation near caves to prevent ore walls in cave systems
+        float oreReductionFactor = GetOreReductionNearCaves(worldPos);
         
         // Diamond (very rare, only deep)
-        if (worldPos.y <= 8 && chance < 0.003f * depthFactor)
+        if (worldPos.y <= 16 && chance < 0.003f * depthFactor * oreReductionFactor)
             return BlockType.Diamond;
         
         // Gold (rare, deeper preferred)
-        if (worldPos.y <= 10 && chance < 0.008f * depthFactor)
+        if (worldPos.y <= 20 && chance < 0.008f * depthFactor * oreReductionFactor)
             return BlockType.Gold;
         
-        // Iron (common)
-        if (chance < 0.06f)
+        // Iron (common, but reduced)
+        if (chance < 0.04f * oreReductionFactor) // Reduced from 0.06f
             return BlockType.Iron;
         
-        // Coal (most common)
-        if (chance < 0.15f)
+        // Coal (most common, but reduced)
+        if (chance < 0.10f * oreReductionFactor) // Reduced from 0.15f
             return BlockType.Coal;
             
         return BlockType.Stone;
@@ -1193,15 +1256,17 @@ public class WorldGenerator : MonoBehaviour
         float detailZ = worldPos.z * 0.05f + seedOffset;
         float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
         
-        // Combine: higher base variation + smaller common hills + details
-        float combinedHeight = 30f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
-        int surfaceHeight = Mathf.RoundToInt(combinedHeight); // Base Y=25-35, hills up to Y=39
+        // Combine: higher base variation + smaller common hills + details  
+        float combinedHeight = 95f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        int surfaceHeight = Mathf.RoundToInt(combinedHeight); // Base Y=90-100, hills up to Y=104
         
         // Debug logging disabled to improve performance
-        // if (worldPos.x >= -2 && worldPos.x <= 2 && worldPos.z >= -2 && worldPos.z <= 2 && worldPos.y == surfaceHeight)
-        // {
-        //     Debug.Log($"Plains Terrain - Pos: {worldPos}, baseNoise: {baseNoise:F3}, hillNoise: {hillNoise:F3}, hillMult: {hillMultiplier:F3}, detailNoise: {detailNoise:F3}, height: {surfaceHeight}, seed: {worldSeed}");
-        // }
+        
+        // Check for cave entrances first (higher priority than normal terrain)
+        if (enableCaveEntrances && ShouldCreateCaveEntranceAt(worldPos, surfaceHeight))
+        {
+            return BlockType.Air;
+        }
         
         if (worldPos.y < surfaceHeight - 4) return BlockType.Stone;
         if (worldPos.y < surfaceHeight) return BlockType.Dirt;
@@ -1236,12 +1301,158 @@ public class WorldGenerator : MonoBehaviour
         float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
         
         // Combine: higher base variation + smaller common hills + details
-        float combinedHeight = 30f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        float combinedHeight = 95f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
         int surfaceHeight = Mathf.RoundToInt(combinedHeight);
         return Mathf.Min(worldHeight - 1, surfaceHeight);
     }
 
     // Removed old complex noise system - now using simple Perlin noise in surface generation
+
+    // --- Cave Generation Methods ---
+    
+    /// <summary>
+    /// Determines if a cave should be generated at the given world position
+    /// Integrates with the CaveGenerator class and respects user settings
+    /// </summary>
+    private bool ShouldGenerateCaveAt(Vector3Int worldPos)
+    {
+        // Respect height limits
+        if (worldPos.y < minCaveHeight || worldPos.y > maxCaveHeight)
+            return false;
+            
+        // Apply density multiplier by adjusting thresholds
+        float densityAdjustment = (2f - caveDensity) * 0.1f; // Higher caveDensity = lower threshold adjustment
+        
+        switch (caveMode)
+        {
+            case CaveGenerationMode.Simple:
+                return CaveGenerator.ShouldGenerateSimpleCave(worldPos, worldSeed, caveDensity);
+                
+            case CaveGenerationMode.Advanced:
+                return CaveGenerator.ShouldGenerateAdvancedCave(worldPos, worldSeed, caveDensity);
+                
+            case CaveGenerationMode.Tunnels:
+            default:
+                return CaveGenerator.ShouldGenerateCave(worldPos, worldSeed, caveDensity);
+        }
+    }
+    
+    /// <summary>
+    /// Updates CaveGenerator constants based on user settings
+    /// Called during world initialization to sync settings
+    /// </summary>
+    private void UpdateCaveGeneratorSettings()
+    {
+        // This could be expanded to dynamically update CaveGenerator constants
+        // For now, we use the method parameters to control behavior
+    }
+    
+    /// <summary>
+    /// Initialize debug systems for cave visualization
+    /// Note: Add CaveXRaySystem and CaveDebugVisualizer components manually in Inspector if needed
+    /// </summary>
+    private void InitializeDebugSystems()
+    {
+        if (!enableCaveDebug) return;
+        
+        UnityEngine.Debug.Log("Cave Debug enabled. To use X-Ray vision:");
+        UnityEngine.Debug.Log("1. Add CaveXRaySystem component to this GameObject manually");
+        UnityEngine.Debug.Log("2. Add CaveDebugVisualizer component to this GameObject manually");
+        UnityEngine.Debug.Log("3. Press F3 for X-Ray, F4 for debug visualization");
+        UnityEngine.Debug.Log("4. Press G for simple cave debug info");
+    }
+    
+    void OnGUI()
+    {
+        if (showCaveDebug)
+        {
+            string debugInfo = $"Cave Debug Info:\n" +
+                             $"Enabled: {enableCaves}\n" +
+                             $"Mode: {caveMode}\n" +
+                             $"Height: {minCaveHeight}-{maxCaveHeight}\n" +
+                             $"Density: {caveDensity:F1}\n" +
+                             $"World Height: {worldHeight}\n" +
+                             $"Press G to hide";
+                             
+            GUI.Box(new Rect(10, 10, 250, 140), debugInfo);
+            
+            // Show player position and cave info
+            if (Camera.main != null)
+            {
+                Vector3 camPos = Camera.main.transform.position;
+                Vector3Int blockPos = new Vector3Int(
+                    Mathf.RoundToInt(camPos.x),
+                    Mathf.RoundToInt(camPos.y),
+                    Mathf.RoundToInt(camPos.z)
+                );
+                
+                bool shouldHaveCave = enableCaves && 
+                                    blockPos.y >= minCaveHeight && 
+                                    blockPos.y <= maxCaveHeight && 
+                                    ShouldGenerateCaveAt(blockPos);
+                                    
+                string posInfo = $"Position Info:\n" +
+                               $"X: {blockPos.x}, Y: {blockPos.y}, Z: {blockPos.z}\n" +
+                               $"Should have cave: {shouldHaveCave}\n" +
+                               $"In cave range: {blockPos.y >= minCaveHeight && blockPos.y <= maxCaveHeight}";
+                               
+                GUI.Box(new Rect(270, 10, 250, 100), posInfo);
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Optimized ore reduction factor near caves - simplified for performance
+    /// Returns a multiplier (0.5-1.0) where lower values mean fewer ores
+    /// </summary>
+    private float GetOreReductionNearCaves(Vector3Int worldPos)
+    {
+        if (!enableCaves) return 1f;
+        
+        // Fast check: only test current position for cave to avoid expensive neighbor checks
+        if (ShouldGenerateCaveAt(worldPos))
+        {
+            return 0.5f; // Reduce ores in cave blocks themselves
+        }
+        
+        // Quick 6-direction neighbor check (much faster than 3x3x3)
+        Vector3Int[] directions = {
+            Vector3Int.up, Vector3Int.down,
+            Vector3Int.left, Vector3Int.right,
+            Vector3Int.forward, Vector3Int.back
+        };
+        
+        int caveNeighbors = 0;
+        foreach (var dir in directions)
+        {
+            if (ShouldGenerateCaveAt(worldPos + dir))
+            {
+                caveNeighbors++;
+                if (caveNeighbors >= 2) break; // Early exit for performance
+            }
+        }
+        
+        // Simple reduction based on immediate neighbors
+        if (caveNeighbors >= 2) return 0.6f; // Multiple cave neighbors
+        if (caveNeighbors == 1) return 0.8f; // One cave neighbor
+        return 1f; // No cave neighbors
+    }
+    
+    /// <summary>
+    /// Enhanced surface block generation that includes cave entrances
+    /// Integrates cave entrance generation with existing terrain
+    /// </summary>
+    private bool ShouldCreateCaveEntranceAt(Vector3Int worldPos, int surfaceHeight)
+    {
+        if (!enableCaves) return false;
+        
+        // Only check positions that could be cave entrances (near surface)
+        if (worldPos.y < surfaceHeight - 20 || worldPos.y > surfaceHeight + 2)
+            return false;
+            
+        // Use CaveGenerator's enhanced organic entrance system
+        return CaveGenerator.ShouldCreateOrganicEntranceShape(worldPos, surfaceHeight, worldSeed);
+    }
 
     // --- Chunk streaming helpers ---
     private void EnsureChunksRoot()
@@ -1361,7 +1572,8 @@ public class WorldGenerator : MonoBehaviour
             {
                 // Column-specific top to avoid iterating unnecessary upper air cells
                 int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
-                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+                // IMPORTANT: Extend generation to max cave height to allow caves above terrain
+                int columnMaxY = Mathf.Min(worldHeight - 1, Mathf.Max(columnTop, maxCaveHeight + 5));
                 for (int ly = 0; ly <= columnMaxY; ly++)
                 {
                     var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
@@ -1579,7 +1791,8 @@ public class WorldGenerator : MonoBehaviour
             for (int lz = 0; lz < chunkSizeZ; lz++)
             {
                 int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
-                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+                // IMPORTANT: Extend generation to max cave height to allow caves above terrain
+                int columnMaxY = Mathf.Min(worldHeight - 1, Mathf.Max(columnTop, maxCaveHeight + 5));
                 for (int ly = 0; ly <= columnMaxY; ly++)
                 {
                     var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
@@ -1601,7 +1814,8 @@ public class WorldGenerator : MonoBehaviour
             for (int lz = 0; lz < chunkSizeZ; lz++)
             {
                 int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
-                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+                // IMPORTANT: Extend generation to max cave height to allow caves above terrain
+                int columnMaxY = Mathf.Min(worldHeight - 1, Mathf.Max(columnTop, maxCaveHeight + 5));
                 for (int ly = 0; ly <= columnMaxY; ly++)
                 {
                     var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);

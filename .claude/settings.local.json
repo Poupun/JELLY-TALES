@@ -15,7 +15,9 @@
       "mcp__ide__executeCode",
       "Bash(git restore:*)",
       "Bash(git checkout:*)",
-      "WebSearch"
+      "WebSearch",
+      "WebFetch(domain:stackoverflow.com)",
+      "WebFetch(domain:gamedev.stackexchange.com)"
     ],
     "deny": [
       "mcp__UnityMCP__manage_editor"

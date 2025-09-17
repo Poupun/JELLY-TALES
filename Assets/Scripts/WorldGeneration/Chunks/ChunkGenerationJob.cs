@@ -14,6 +14,10 @@ namespace WorldGeneration.Chunks
         [ReadOnly] public int chunkSizeY;  
         [ReadOnly] public int chunkSizeZ;
         [ReadOnly] public int worldSeed;
+        [ReadOnly] public bool enableCaves;
+        [ReadOnly] public int minCaveHeight;
+        [ReadOnly] public int maxCaveHeight;
+        [ReadOnly] public float caveDensity;
         
         // Output array for block types (flattened 3D array)
         [WriteOnly] public NativeArray<int> blockData;
@@ -60,11 +64,19 @@ namespace WorldGeneration.Chunks
         
         private BlockType GenerateBlockTypeAt(int worldX, int worldY, int worldZ, int surfaceY)
         {
+            Vector3Int worldPos = new Vector3Int(worldX, worldY, worldZ);
+            
             // Bedrock at bottom
             if (worldY == 0) return BlockType.Bedrock;
             
             // Air above surface
             if (worldY > surfaceY) return BlockType.Air;
+            
+            // Check for caves using configurable height settings
+            if (enableCaves && worldY >= minCaveHeight && worldY <= maxCaveHeight && ShouldGenerateCaveAtJob(worldPos))
+            {
+                return BlockType.Air;
+            }
             
             // Surface layer
             if (worldY == surfaceY) return BlockType.Grass;
@@ -75,13 +87,13 @@ namespace WorldGeneration.Chunks
             // Deep stone with ore generation
             if (worldY < surfaceY - 3)
             {
-                // Simple ore generation using hash-based random
+                // Simple ore generation using hash-based random (reduced rates)
                 float oreChance = GetHashedFloat(worldX, worldY, worldZ, worldSeed);
                 
-                if (oreChance < 0.02f) return BlockType.Diamond;
-                if (oreChance < 0.05f) return BlockType.Gold;
-                if (oreChance < 0.08f) return BlockType.Iron;
-                if (oreChance < 0.12f) return BlockType.Coal;
+                if (oreChance < 0.015f) return BlockType.Diamond; // Reduced from 0.02f
+                if (oreChance < 0.035f) return BlockType.Gold;    // Reduced from 0.05f
+                if (oreChance < 0.055f) return BlockType.Iron;    // Reduced from 0.08f
+                if (oreChance < 0.085f) return BlockType.Coal;    // Reduced from 0.12f
                 
                 return BlockType.Stone;
             }
@@ -99,6 +111,58 @@ namespace WorldGeneration.Chunks
             hash = ((hash >> 16) ^ hash) * 0x45d9f3b;
             hash = (hash >> 16) ^ hash;
             return (hash & 0x7FFFFFFF) / (float)0x7FFFFFFF;
+        }
+        
+        /// <summary>
+        /// Job-optimized cave generation using simple 3D noise
+        /// Replicates the logic from CaveGenerator.ShouldGenerateAdvancedCave
+        /// </summary>
+        private bool ShouldGenerateCaveAtJob(Vector3Int worldPos)
+        {
+            const float RIDGE_FREQ = 0.025f;
+            const float CHAMBER_FREQ = 0.015f;
+            
+            float seedOffset = (worldSeed % 10000) * 0.01f;
+            
+            // Ridged noise for tunnel-like formations
+            float ridgeX = worldPos.x * RIDGE_FREQ + seedOffset;
+            float ridgeY = worldPos.y * 0.02f + seedOffset * 0.5f;
+            float ridgeZ = worldPos.z * RIDGE_FREQ + seedOffset;
+            
+            // Create ridged noise by taking absolute value and inverting
+            float ridgeNoise1 = 1f - Mathf.Abs(Mathf.PerlinNoise(ridgeX, ridgeZ + ridgeY) * 2f - 1f);
+            float ridgeNoise2 = 1f - Mathf.Abs(Mathf.PerlinNoise(ridgeX + 100f, ridgeZ + ridgeY + 100f) * 2f - 1f);
+            
+            // Intersect the two ridged noises for thin tunnels
+            float intersectionNoise = ridgeNoise1 * ridgeNoise2;
+            
+            // Wider chamber noise for larger cave areas
+            float chamberX = worldPos.x * CHAMBER_FREQ + seedOffset;
+            float chamberY = worldPos.y * 0.01f + seedOffset * 0.3f;
+            float chamberZ = worldPos.z * CHAMBER_FREQ + seedOffset;
+            float chamberNoise = Mathf.PerlinNoise(chamberX, chamberZ + chamberY);
+            
+            // Height factor for natural cave distribution
+            float heightFactor = 0f;
+            if (worldPos.y < 8)
+            {
+                heightFactor = (8f - worldPos.y) * 0.15f;
+            }
+            else if (worldPos.y > 15)
+            {
+                heightFactor = (worldPos.y - 15f) * 0.08f;
+            }
+            
+            // Apply cave density multiplier to thresholds
+            float tunnelThreshold = 0.6f * (1f - heightFactor * 0.1f) / caveDensity;
+            float chamberThreshold = 0.65f * (1f - heightFactor * 0.05f) / caveDensity;
+            
+            // Tunnels where intersection is strong
+            bool isTunnel = intersectionNoise > tunnelThreshold;
+            // Chambers where chamber noise is high
+            bool isChamber = chamberNoise > chamberThreshold;
+            
+            return isTunnel || isChamber;
         }
     }
     

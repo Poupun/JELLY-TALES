@@ -1976,7 +1976,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   worldWidth: 16
   worldHeight: 102
-  worldDepth: 100
+  worldDepth: 200
   worldSeed: 12345
   useChunkStreaming: 1
   chunkSizeX: 16
@@ -2053,6 +2053,11 @@ MonoBehaviour:
   enforceTreeSpacing: 0
   treeSpacing: 6
   constrainTreesInsideChunk: 0
+  enableCaves: 1
+  caveMode: 1
+  caveDensity: 0.5
+  minCaveHeight: 1
+  maxCaveHeight: 85
   enableLeafWind: 1
   leafWindAmplitude: 0.1374
   leafWindSpeed: 1.2
@@ -2079,6 +2084,8 @@ MonoBehaviour:
   plantSizePlant: 0.965
   plantSizeGrass: 1
   clearSavedEditsOnReload: 0
+  enableCaveDebug: 1
+  enableSimpleCaveDebug: 1
   reseedOnReload: 0
   triggerReloadInPlay: 0
   tickIntervalSeconds: 0.5

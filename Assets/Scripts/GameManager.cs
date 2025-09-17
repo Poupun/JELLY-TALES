@@ -171,7 +171,7 @@ public class GameManager : MonoBehaviour
                 GameObject player = GameObject.FindGameObjectWithTag("Player");
                 if (player != null)
                 {
-                    Vector3 safeStartPos = new Vector3(0, 150, 0); // Start at Y=150, will snap to ground later
+                    Vector3 safeStartPos = new Vector3(0, 110, 0); // Start at Y=110, will snap to ground later
                     player.transform.position = safeStartPos;
                     Debug.Log($"GameManager: Positioned player at safe starting height {safeStartPos} for new world");
                 }
