@@ -19,16 +19,16 @@ namespace WorldGeneration.Chunks
         public bool useOptimizedBlockGeneration = true;
         
         [Tooltip("Milliseconds per frame budget for chunk generation")]
-        [Range(0.1f, 2f)] public float generationTimeBudget = 0.5f;
+        [Range(0.1f, 10f)] public float generationTimeBudget = 5f; // Increased budget for faster generation
         
         [Tooltip("Blocks to process before yielding")]
-        [Range(5, 50)] public int blocksPerYield = 20;
+        [Range(5, 2000)] public int blocksPerYield = 1000; // Significantly increased for faster generation
         
         [Tooltip("Reduce chunk loads per frame to improve FPS")]
         public bool limitChunkLoadsPerFrame = true;
         
         [Tooltip("Max chunks to load per frame")]
-        [Range(1, 3)] public int maxChunksPerFrame = 1;
+        [Range(1, 10)] public int maxChunksPerFrame = 6; // Increased for faster loading
         
         
         private WorldGenerator worldGenerator;

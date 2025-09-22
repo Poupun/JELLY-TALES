@@ -15,7 +15,9 @@
       "mcp__ide__executeCode",
       "Bash(git restore:*)",
       "Bash(git checkout:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(/Applications/Unity/Hub/Editor/6000.0.33f1/Unity.app/Contents/MacOS/Unity:*)",
+      "Bash(rg:*)"
     ],
     "deny": [
       "mcp__UnityMCP__manage_editor"

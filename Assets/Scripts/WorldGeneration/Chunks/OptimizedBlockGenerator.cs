@@ -104,53 +104,92 @@ namespace WorldGeneration.Chunks
         {
             if (worldPos.y < 0 || worldPos.y >= worldGenerator.worldHeight) return BlockType.Air;
             
-            // Bedrock layer
-            if (worldPos.y == 0) return BlockType.Bedrock;
+            // Bedrock layer (expanded to Y=0-2)
+            if (worldPos.y <= 2) return BlockType.Bedrock;
             
-            // Deep underground (Y 1-12) - Stone with ores
-            if (worldPos.y <= 12)
+            // Deep underground layers (Y 3-99) - Expanded from Y=0-25 to Y=0-99
+            if (worldPos.y <= 99)
             {
                 return GenerateUndergroundBlockOptimized(worldPos);
             }
             
-            // Underground stone layer (Y 13-25)
-            if (worldPos.y <= 25)
-            {
-                // Fast random using hash instead of System.Random
-                float chance = GetFastRandom(worldPos);
-                
-                if (chance < 0.05f) return BlockType.Coal;
-                if (chance < 0.08f && worldPos.y <= 20) return BlockType.Iron;
-                if (chance < 0.15f) return BlockType.Gravel;
-                
-                return BlockType.Stone;
-            }
-            
-            // Surface terrain (Y 26+)
+            // Surface terrain (Y 100+)
             return GenerateSurfaceBlockOptimized(worldPos);
         }
         
         private BlockType GenerateUndergroundBlockOptimized(Vector3Int worldPos)
         {
             float chance = GetFastRandom(worldPos);
-            float depthFactor = (13f - worldPos.y) / 13f;
             
-            // Diamond (very rare, only deep)
-            if (worldPos.y <= 8 && chance < 0.003f * depthFactor)
-                return BlockType.Diamond;
+            // Calculate depth factor: deeper = rarer ores (Y=3 is deepest, Y=99 is shallowest)
+            float depthFactor = (100f - worldPos.y) / 97f; // 0.0 at surface, 1.0 at deepest
             
-            // Gold (rare, deeper preferred)
-            if (worldPos.y <= 10 && chance < 0.008f * depthFactor)
-                return BlockType.Gold;
-            
-            // Iron (common)
-            if (chance < 0.06f)
-                return BlockType.Iron;
-            
-            // Coal (most common)
-            if (chance < 0.15f)
-                return BlockType.Coal;
+            // Deep Underground (Y 3-30): Deepest ores
+            if (worldPos.y <= 30)
+            {
+                // Diamond (very rare, only in deepest layers)
+                if (worldPos.y <= 20 && chance < 0.004f * depthFactor)
+                    return BlockType.Diamond;
                 
+                // Gold (rare, deep preferred)
+                if (worldPos.y <= 25 && chance < 0.010f * depthFactor)
+                    return BlockType.Gold;
+                
+                // Iron (common at all depths)
+                if (chance < 0.08f)
+                    return BlockType.Iron;
+                
+                // Coal (most common)
+                if (chance < 0.18f)
+                    return BlockType.Coal;
+                    
+                // Gravel pockets
+                if (chance < 0.25f)
+                    return BlockType.Gravel;
+                    
+                return BlockType.Stone;
+            }
+            
+            // Mid Underground (Y 31-60): Mixed ore distribution
+            if (worldPos.y <= 60)
+            {
+                // Gold (less common than deep, but still present)
+                if (chance < 0.008f * depthFactor)
+                    return BlockType.Gold;
+                
+                // Iron (very common in mid layers)
+                if (chance < 0.10f)
+                    return BlockType.Iron;
+                
+                // Coal (abundant)
+                if (chance < 0.20f)
+                    return BlockType.Coal;
+                    
+                // Gravel
+                if (chance < 0.15f)
+                    return BlockType.Gravel;
+                    
+                return BlockType.Stone;
+            }
+            
+            // Shallow Underground (Y 61-99): Mostly stone with some coal/iron
+            if (worldPos.y <= 99)
+            {
+                // Iron (less common near surface)
+                if (chance < 0.06f)
+                    return BlockType.Iron;
+                
+                // Coal (still present but less dense)
+                if (chance < 0.12f)
+                    return BlockType.Coal;
+                    
+                // Gravel
+                if (chance < 0.10f)
+                    return BlockType.Gravel;
+                    
+                return BlockType.Stone;
+            }
+            
             return BlockType.Stone;
         }
         
@@ -172,7 +211,8 @@ namespace WorldGeneration.Chunks
                 float detailNoise = detailNoiseCache[worldPos2D];
                 
                 float hillMultiplier = hillNoise > 0.3f ? Mathf.Pow((hillNoise - 0.3f) / 0.7f, 1.2f) : 0f;
-                float combinedHeight = 30f + baseNoise * 5f + hillMultiplier * 4f + detailNoise * 0.3f;
+                // Moved surface to Y=100-120 to allow for 100 underground levels (Y=0-99)
+                float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise * 0.3f;
                 surfaceHeight = Mathf.RoundToInt(combinedHeight);
                 
                 // Cache the result
@@ -206,7 +246,8 @@ namespace WorldGeneration.Chunks
             // Detail
             float detailNoise = Mathf.PerlinNoise(worldX * 0.05f + seedOffset, worldZ * 0.05f + seedOffset);
             
-            float combinedHeight = 30f + baseNoise * 5f + hillMultiplier * 4f + detailNoise * 0.3f;
+            // Moved surface to Y=100-120 to allow for 100 underground levels (Y=0-99)
+            float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise * 0.3f;
             return Mathf.RoundToInt(combinedHeight);
         }
         

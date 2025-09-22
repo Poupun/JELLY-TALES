@@ -11,13 +11,13 @@ namespace WorldGeneration.Chunks
     {
         [Header("Ultra-Smooth Settings")]
         [Tooltip("Maximum blocks to process per frame")]
-        [Range(5, 50)] public int maxBlocksPerFrame = 20;
+        [Range(5, 2000)] public int maxBlocksPerFrame = 1000; // Significantly increased for faster generation
         
         [Tooltip("Maximum time per frame in milliseconds")]
-        [Range(0.1f, 2f)] public float maxTimePerFrame = 0.5f;
+        [Range(0.1f, 10f)] public float maxTimePerFrame = 5f; // Increased time budget for faster generation
         
         [Tooltip("Yield after every N blocks regardless of time")]
-        [Range(5, 25)] public int forceYieldEvery = 10;
+        [Range(5, 1000)] public int forceYieldEvery = 500; // Much less frequent yielding for faster generation
         
         private WorldGenerator worldGenerator;
         
@@ -134,8 +134,8 @@ namespace WorldGeneration.Chunks
                     surfaceHeights[lx, lz] = CalculateOptimizedHeight(worldX, worldZ);
                     processed++;
                     
-                    // Yield frequently during height calculation
-                    if (processed % 10 == 0 || (Time.realtimeSinceStartup - startTime) * 1000f > 0.5f)
+                    // Yield less frequently during height calculation
+                    if (processed % 100 == 0 || (Time.realtimeSinceStartup - startTime) * 1000f > 5f)
                     {
                         yield return null;
                         startTime = Time.realtimeSinceStartup;

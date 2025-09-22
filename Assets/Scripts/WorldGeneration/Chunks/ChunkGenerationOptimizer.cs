@@ -11,10 +11,10 @@ namespace WorldGeneration.Chunks
     {
         [Header("Generation Optimization")]
         [Tooltip("Maximum time per frame for chunk generation (milliseconds)")]
-        [Range(0.5f, 5f)] public float maxGenerationTimePerFrame = 1f;
+        [Range(0.5f, 15f)] public float maxGenerationTimePerFrame = 8f; // Increased for faster generation
         
         [Tooltip("Blocks to process before yielding to main thread")]
-        [Range(10, 100)] public int blocksPerYield = 50;
+        [Range(10, 2000)] public int blocksPerYield = 1000; // Significantly increased for faster generation
         
         [Tooltip("Enable optimized noise calculation")]
         public bool optimizeNoise = true;
@@ -91,8 +91,8 @@ namespace WorldGeneration.Chunks
                             processedBlocks = 0;
                         }
                         
-                        // Extra yield every few blocks for ultra-smooth generation
-                        if (processedBlocks % 25 == 0)
+                        // Extra yield every 250 blocks for faster generation
+                        if (processedBlocks % 250 == 0)
                         {
                             yield return null;
                             startTime = Time.realtimeSinceStartup;

@@ -12,7 +12,7 @@ namespace WorldGeneration.Chunks
         [Range(10f, 33f)] public float targetFrameTime = 16.67f; // 60 FPS
         
         [Tooltip("Maximum chunks to load per frame")]
-        [Range(1, 4)] public int maxChunksPerFrame = 2;
+        [Range(1, 12)] public int maxChunksPerFrame = 8; // Increased for better chunk loading
         
         [Tooltip("Enable frame time budgeting")]
         public bool enableFrameBudgeting = true;

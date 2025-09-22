@@ -13,7 +13,7 @@ public class WorldGenerator : MonoBehaviour
 {
     [Header("World Settings")]
     public int worldWidth = 16;
-    public int worldHeight = 16;
+    public int worldHeight = 150;
     public int worldDepth = 16;
 
     [Header("World Generation")]
@@ -25,7 +25,7 @@ public class WorldGenerator : MonoBehaviour
     public bool useChunkStreaming = true;
     [Min(4)] public int chunkSizeX = 16;
     [Min(4)] public int chunkSizeZ = 16;
-    [Min(1)] public int viewDistanceChunks = 4; // Manhattan or square radius
+    [Min(1)] public int viewDistanceChunks = 8; // Manhattan or square radius (increased for better chunk preloading)
     [Tooltip("Player transform used to center chunk streaming. If null, will try to auto-find.")]
     public Transform player;
     private Transform _chunksRoot;
@@ -33,10 +33,10 @@ public class WorldGenerator : MonoBehaviour
     private readonly Queue<Vector2Int> _pendingLoads = new Queue<Vector2Int>();
     private readonly HashSet<Vector2Int> _queued = new HashSet<Vector2Int>();
     private readonly HashSet<Vector2Int> _loading = new HashSet<Vector2Int>();
-    [Min(1)] public int maxChunkLoadsPerFrame = 2;
+    [Min(1)] public int maxChunkLoadsPerFrame = 10; // Increased for larger view distance (8 chunks)
     [Header("Performance Optimization")]
     [Tooltip("Enable async Job System for chunk generation")]
-    public bool useJobSystem = false; // Temporarily disabled
+    public bool useJobSystem = true; // Re-enabled for fast chunk generation
     [Tooltip("Frame time budget in milliseconds")]
     [Range(5f, 33f)] public float targetFrameTime = 16.67f;
     [Header("Meshing (Experimental)")]
@@ -532,11 +532,9 @@ public class WorldGenerator : MonoBehaviour
                 _lastPlantSizeGrass = plantSizeGrass;
                 RebuildPlantsForAllLoadedChunks();
             }
-            // Start background chunk loads with frame time budgeting
-            float frameStartTime = Time.realtimeSinceStartup;
+            // Start background chunk loads (removed frame time restriction for faster loading)
             int budget = Mathf.Max(1, maxChunkLoadsPerFrame);
-            while (budget-- > 0 && _pendingLoads.Count > 0 && 
-                   (Time.realtimeSinceStartup - frameStartTime) * 1000f < targetFrameTime * 0.5f)
+            while (budget-- > 0 && _pendingLoads.Count > 0)
             {
                 var next = _pendingLoads.Dequeue();
                 _queued.Remove(next);
@@ -1112,29 +1110,15 @@ public class WorldGenerator : MonoBehaviour
         if (worldPos.y < 0 || worldPos.y >= worldHeight) return BlockType.Air;
 
         // Bedrock layer (unbreakable foundation)
-        if (worldPos.y == 0) return BlockType.Bedrock;
+        if (worldPos.y <= 2) return BlockType.Bedrock;
         
-        // Deep underground (Y 1-12) - Stone with ores
-        if (worldPos.y <= 12)
+        // Deep underground layers (Y 3-99) - Expanded from Y=0-25 to Y=0-99
+        if (worldPos.y <= 99)
         {
             return GenerateUndergroundBlock(worldPos);
         }
         
-        // Underground stone layer (Y 13-25)
-        if (worldPos.y <= 25)
-        {
-            // Mix of stone and some ores
-            System.Random rng = new System.Random(worldPos.x * 73856093 ^ worldPos.y * 19349663 ^ worldPos.z * 83492791 ^ worldSeed);
-            float chance = (float)rng.NextDouble();
-            
-            if (chance < 0.05f) return BlockType.Coal;
-            if (chance < 0.08f && worldPos.y <= 20) return BlockType.Iron;
-            if (chance < 0.15f) return BlockType.Gravel;
-            
-            return BlockType.Stone;
-        }
-        
-        // Surface terrain (Y 26+)
+        // Surface terrain (Y 100+)
         return GenerateSurfaceBlock(worldPos);
     }
     
@@ -1142,24 +1126,76 @@ public class WorldGenerator : MonoBehaviour
     {
         System.Random rng = new System.Random(worldPos.x * 73856093 ^ worldPos.y * 19349663 ^ worldPos.z * 83492791 ^ worldSeed);
         float chance = (float)rng.NextDouble();
-        float depthFactor = (13f - worldPos.y) / 13f; // Deeper = rarer ores
         
-        // Diamond (very rare, only deep)
-        if (worldPos.y <= 8 && chance < 0.003f * depthFactor)
-            return BlockType.Diamond;
+        // Calculate depth factor: deeper = rarer ores (Y=3 is deepest, Y=99 is shallowest)
+        float depthFactor = (100f - worldPos.y) / 97f; // 0.0 at surface, 1.0 at deepest
         
-        // Gold (rare, deeper preferred)
-        if (worldPos.y <= 10 && chance < 0.008f * depthFactor)
-            return BlockType.Gold;
-        
-        // Iron (common)
-        if (chance < 0.06f)
-            return BlockType.Iron;
-        
-        // Coal (most common)
-        if (chance < 0.15f)
-            return BlockType.Coal;
+        // Deep Underground (Y 3-30): Deepest ores
+        if (worldPos.y <= 30)
+        {
+            // Diamond (very rare, only in deepest layers)
+            if (worldPos.y <= 20 && chance < 0.004f * depthFactor)
+                return BlockType.Diamond;
             
+            // Gold (rare, deep preferred)
+            if (worldPos.y <= 25 && chance < 0.010f * depthFactor)
+                return BlockType.Gold;
+            
+            // Iron (common at all depths)
+            if (chance < 0.08f)
+                return BlockType.Iron;
+            
+            // Coal (most common)
+            if (chance < 0.18f)
+                return BlockType.Coal;
+                
+            // Gravel pockets
+            if (chance < 0.25f)
+                return BlockType.Gravel;
+                
+            return BlockType.Stone;
+        }
+        
+        // Mid Underground (Y 31-60): Mixed ore distribution
+        if (worldPos.y <= 60)
+        {
+            // Gold (less common than deep, but still present)
+            if (chance < 0.008f * depthFactor)
+                return BlockType.Gold;
+            
+            // Iron (very common in mid layers)
+            if (chance < 0.10f)
+                return BlockType.Iron;
+            
+            // Coal (abundant)
+            if (chance < 0.20f)
+                return BlockType.Coal;
+                
+            // Gravel
+            if (chance < 0.15f)
+                return BlockType.Gravel;
+                
+            return BlockType.Stone;
+        }
+        
+        // Shallow Underground (Y 61-99): Mostly stone with some coal/iron
+        if (worldPos.y <= 99)
+        {
+            // Iron (less common near surface)
+            if (chance < 0.06f)
+                return BlockType.Iron;
+            
+            // Coal (still present but less dense)
+            if (chance < 0.12f)
+                return BlockType.Coal;
+                
+            // Gravel
+            if (chance < 0.10f)
+                return BlockType.Gravel;
+                
+            return BlockType.Stone;
+        }
+        
         return BlockType.Stone;
     }
     
@@ -1194,8 +1230,9 @@ public class WorldGenerator : MonoBehaviour
         float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
         
         // Combine: higher base variation + smaller common hills + details
-        float combinedHeight = 30f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
-        int surfaceHeight = Mathf.RoundToInt(combinedHeight); // Base Y=25-35, hills up to Y=39
+        // Moved surface to Y=100-120 to allow for 100 underground levels (Y=0-99)
+        float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        int surfaceHeight = Mathf.RoundToInt(combinedHeight); // Base Y=105-115, hills up to Y=119
         
         // Debug logging disabled to improve performance
         // if (worldPos.x >= -2 && worldPos.x <= 2 && worldPos.z >= -2 && worldPos.z <= 2 && worldPos.y == surfaceHeight)
@@ -1236,7 +1273,8 @@ public class WorldGenerator : MonoBehaviour
         float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
         
         // Combine: higher base variation + smaller common hills + details
-        float combinedHeight = 30f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        // Moved surface to Y=100-120 to allow for 100 underground levels (Y=0-99)
+        float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
         int surfaceHeight = Mathf.RoundToInt(combinedHeight);
         return Mathf.Min(worldHeight - 1, surfaceHeight);
     }
@@ -1494,12 +1532,18 @@ public class WorldGenerator : MonoBehaviour
         // Create chunk
         var chunk = new WorldGeneration.Chunks.Chunk(coord, chunkSizeX, worldHeight, chunkSizeZ, _chunksRoot);
 
-        // Use ultra-smooth generation for virtually zero micro-freezes
-        var ultraSmooth = GetComponent<WorldGeneration.Chunks.UltraSmoothChunkGenerator>();
-        if (ultraSmooth != null)
+        // Priority 1: Use Job System for fastest generation (if enabled)
+        if (useJobSystem)
         {
+            yield return StartCoroutine(GenerateChunkWithJobSystem(chunk, coord));
+        }
+        // Priority 2: Use ultra-smooth generation for virtually zero micro-freezes
+        else if (GetComponent<WorldGeneration.Chunks.UltraSmoothChunkGenerator>() != null)
+        {
+            var ultraSmooth = GetComponent<WorldGeneration.Chunks.UltraSmoothChunkGenerator>();
             yield return StartCoroutine(ultraSmooth.GenerateChunkUltraSmooth(chunk, coord));
         }
+        // Priority 3: Use optimizer as fallback
         else
         {
             var optimizer = GetComponent<WorldGeneration.Chunks.ChunkGenerationOptimizer>();
@@ -1509,7 +1553,7 @@ public class WorldGenerator : MonoBehaviour
             }
             else
             {
-                // Fallback to traditional generation with more frequent yields
+                // Final fallback to traditional generation
                 yield return StartCoroutine(GenerateChunkTraditionalOptimized(chunk, coord));
             }
         }
@@ -1616,8 +1660,8 @@ public class WorldGenerator : MonoBehaviour
                         processedBlocks = 0;
                     }
                     
-                    // Extra yield every 20 blocks for ultra-smooth generation
-                    if (processedBlocks % 20 == 0)
+                    // Extra yield every 500 blocks for faster generation
+                    if (processedBlocks % 500 == 0)
                     {
                         yield return null;
                         frameStartTime = Time.realtimeSinceStartup;

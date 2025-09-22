@@ -13,7 +13,7 @@ namespace WorldGeneration.Chunks
                                                    int chunkSizeX, int chunkSizeY, int chunkSizeZ, int worldSeed)
         {
             int processedBlocks = 0;
-            int yieldFrequency = Mathf.Max(1, chunkSizeX * chunkSizeZ / 8); // Yield every ~1/8th of layer
+            int yieldFrequency = Mathf.Max(100, chunkSizeX * chunkSizeZ * 2); // Reduced yielding for faster generation
 
             for (int x = 0; x < chunkSizeX; x++)
             {
@@ -44,18 +44,34 @@ namespace WorldGeneration.Chunks
         
         private static float GetHeightAt(int worldX, int worldZ, int worldSeed)
         {
-            float scale = 0.01f;
-            float baseHeight = 8f;
-            float amplitude = 4f;
+            // Updated to match main generator: surface at Y=100-120
+            float seedOffset = (worldSeed % 10000) * 0.01f;
             
-            float noise = Mathf.PerlinNoise(worldX * scale + worldSeed * 0.1f, worldZ * scale + worldSeed * 0.1f);
-            return baseHeight + noise * amplitude;
+            // Base terrain noise
+            float baseX = worldX * 0.008f + seedOffset;
+            float baseZ = worldZ * 0.008f + seedOffset;
+            float baseNoise = Mathf.PerlinNoise(baseX, baseZ) * 2f - 1f;
+            
+            // Hill noise for occasional hills
+            float hillX = worldX * 0.003f + seedOffset;
+            float hillZ = worldZ * 0.003f + seedOffset;
+            float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
+            float hillMultiplier = Mathf.Max(0f, hillNoise - 0.6f) * 10f;
+            
+            // Detail noise for fine terrain variation
+            float detailX = worldX * 0.05f + seedOffset;
+            float detailZ = worldZ * 0.05f + seedOffset;
+            float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
+            
+            // Combine: surface at Y=100-120
+            float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+            return combinedHeight;
         }
         
         private static BlockType GenerateBlockTypeAt(int worldX, int worldY, int worldZ, int surfaceY, int worldSeed)
         {
-            // Bedrock at bottom
-            if (worldY == 0) return BlockType.Bedrock;
+            // Bedrock layer (expanded to Y=0-2)
+            if (worldY <= 2) return BlockType.Bedrock;
             
             // Air above surface
             if (worldY > surfaceY) return BlockType.Air;
@@ -63,24 +79,92 @@ namespace WorldGeneration.Chunks
             // Surface layer
             if (worldY == surfaceY) return BlockType.Grass;
             
-            // Subsurface layers
-            if (worldY >= surfaceY - 3) return BlockType.Dirt;
+            // Subsurface layers (dirt below grass)
+            if (worldY >= surfaceY - 4) return BlockType.Dirt;
             
-            // Deep stone with ore generation
-            if (worldY < surfaceY - 3)
+            // Underground layers (Y 3-99) - Expanded underground generation
+            if (worldY <= 99)
             {
-                // Simple ore generation using hash-based random
-                float oreChance = GetHashedFloat(worldX, worldY, worldZ, worldSeed);
-                
-                if (oreChance < 0.02f) return BlockType.Diamond;
-                if (oreChance < 0.05f) return BlockType.Gold;
-                if (oreChance < 0.08f) return BlockType.Iron;
-                if (oreChance < 0.12f) return BlockType.Coal;
-                
-                return BlockType.Stone;
+                return GenerateUndergroundBlock(worldX, worldY, worldZ, worldSeed);
             }
             
             return BlockType.Air;
+        }
+        
+        private static BlockType GenerateUndergroundBlock(int worldX, int worldY, int worldZ, int worldSeed)
+        {
+            float chance = GetHashedFloat(worldX, worldY, worldZ, worldSeed);
+            
+            // Calculate depth factor: deeper = rarer ores (Y=3 is deepest, Y=99 is shallowest)
+            float depthFactor = (100f - worldY) / 97f; // 0.0 at surface, 1.0 at deepest
+            
+            // Deep Underground (Y 3-30): Deepest ores
+            if (worldY <= 30)
+            {
+                // Diamond (very rare, only in deepest layers)
+                if (worldY <= 20 && chance < 0.004f * depthFactor)
+                    return BlockType.Diamond;
+                
+                // Gold (rare, deep preferred)
+                if (worldY <= 25 && chance < 0.010f * depthFactor)
+                    return BlockType.Gold;
+                
+                // Iron (common at all depths)
+                if (chance < 0.08f)
+                    return BlockType.Iron;
+                
+                // Coal (most common)
+                if (chance < 0.18f)
+                    return BlockType.Coal;
+                    
+                // Gravel pockets
+                if (chance < 0.25f)
+                    return BlockType.Gravel;
+                    
+                return BlockType.Stone;
+            }
+            
+            // Mid Underground (Y 31-60): Mixed ore distribution
+            if (worldY <= 60)
+            {
+                // Gold (less common than deep, but still present)
+                if (chance < 0.008f * depthFactor)
+                    return BlockType.Gold;
+                
+                // Iron (very common in mid layers)
+                if (chance < 0.10f)
+                    return BlockType.Iron;
+                
+                // Coal (abundant)
+                if (chance < 0.20f)
+                    return BlockType.Coal;
+                    
+                // Gravel
+                if (chance < 0.15f)
+                    return BlockType.Gravel;
+                    
+                return BlockType.Stone;
+            }
+            
+            // Shallow Underground (Y 61-99): Mostly stone with some coal/iron
+            if (worldY <= 99)
+            {
+                // Iron (less common near surface)
+                if (chance < 0.06f)
+                    return BlockType.Iron;
+                
+                // Coal (still present but less dense)
+                if (chance < 0.12f)
+                    return BlockType.Coal;
+                    
+                // Gravel
+                if (chance < 0.10f)
+                    return BlockType.Gravel;
+                    
+                return BlockType.Stone;
+            }
+            
+            return BlockType.Stone;
         }
         
         private static float GetHashedFloat(int x, int y, int z, int seed)
