@@ -17,6 +17,7 @@ namespace WorldGeneration.Chunks
         [Tooltip("Pre-calculate surface heights for entire columns")]
         public bool preCalculateHeights = true;
         
+        
         private WorldGenerator worldGenerator;
         
         // Cached noise values to avoid expensive Perlin noise calls
@@ -74,6 +75,7 @@ namespace WorldGeneration.Chunks
             }
         }
         
+        
         /// <summary>
         /// Pre-calculate surface heights for entire chunk
         /// </summary>
@@ -107,18 +109,58 @@ namespace WorldGeneration.Chunks
             // Bedrock layer (expanded to Y=0-2)
             if (worldPos.y <= 2) return BlockType.Bedrock;
             
-            // Deep underground layers (Y 3-99) - Expanded from Y=0-25 to Y=0-99
+            // Check for NEW tunnel system FIRST at all Y levels (including surface!)
+            if (worldGenerator.enableTunnels && WorldGeneration.HorizontalTunnelGenerator.IsTunnelBlock(worldPos, worldGenerator.worldSeed, worldGenerator.tunnelSettings))
+            {
+                return BlockType.Air; // Tunnel air space
+            }
+            
+            // Deep underground layers (Y 3-99) - Only generate solid blocks if no tunnel
             if (worldPos.y <= 99)
             {
                 return GenerateUndergroundBlockOptimized(worldPos);
             }
             
-            // Surface terrain (Y 100+)
+            // Surface terrain (Y 100+) - Only generate if no tunnel
             return GenerateSurfaceBlockOptimized(worldPos);
         }
         
         private BlockType GenerateUndergroundBlockOptimized(Vector3Int worldPos)
         {
+            // Use WorldGenerator's ore settings instead of local settings
+            var worldGen = worldGenerator;
+            if (worldGen != null && worldGen.oreSettings.enableChunkOreGeneration)
+            {
+                // Calculate which chunk this position belongs to using WorldGenerator's chunk size
+                Vector2Int chunkCoord = new Vector2Int(
+                    Mathf.FloorToInt(worldPos.x / (float)worldGen.chunkSizeX),
+                    Mathf.FloorToInt(worldPos.z / (float)worldGen.chunkSizeZ)
+                );
+                
+                // Ensure chunk ore generation is initialized
+                ChunkOreGenerator.GenerateChunkOreBlobs(chunkCoord, worldGen.chunkSizeX, worldGen.chunkSizeZ, worldGen.worldSeed, worldGen.oreSettings);
+                
+                // Get ore type from chunk-based system
+                BlockType oreType = ChunkOreGenerator.GetOreAtPosition(worldPos, chunkCoord, worldGen.worldSeed, worldGen.oreSettings);
+                
+                if (oreType != BlockType.Stone)
+                {
+                    return oreType; // Return the ore from the chunk system
+                }
+                
+                return BlockType.Stone; // Default to stone
+            }
+            
+            // Fallback to old system if chunk ore generation is disabled or no WorldGenerator
+            return GenerateUndergroundBlockLegacy(worldPos);
+        }
+        
+        /// <summary>
+        /// Legacy ore generation system (kept as fallback)
+        /// </summary>
+        private BlockType GenerateUndergroundBlockLegacy(Vector3Int worldPos)
+        {
+            // Original random-based ore generation
             float chance = GetFastRandom(worldPos);
             
             // Calculate depth factor: deeper = rarer ores (Y=3 is deepest, Y=99 is shallowest)

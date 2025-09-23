@@ -10,7 +10,8 @@ namespace WorldGeneration.Chunks
     public static class ChunkGenerationFallback
     {
         public static IEnumerator GenerateChunkAsync(WorldGeneration.Chunks.Chunk chunk, Vector2Int coord, 
-                                                   int chunkSizeX, int chunkSizeY, int chunkSizeZ, int worldSeed)
+                                                   int chunkSizeX, int chunkSizeY, int chunkSizeZ, int worldSeed,
+                                                   bool enableTunnels = false, WorldGeneration.HorizontalTunnelGenerator.TunnelSettings tunnelSettings = null)
         {
             int processedBlocks = 0;
             int yieldFrequency = Mathf.Max(100, chunkSizeX * chunkSizeZ * 2); // Reduced yielding for faster generation
@@ -28,7 +29,7 @@ namespace WorldGeneration.Chunks
                     
                     for (int y = 0; y < chunkSizeY; y++)
                     {
-                        BlockType blockType = GenerateBlockTypeAt(worldX, y, worldZ, surfaceY, worldSeed);
+                        BlockType blockType = GenerateBlockTypeAt(worldX, y, worldZ, surfaceY, worldSeed, enableTunnels, tunnelSettings);
                         chunk.SetLocal(x, y, z, blockType);
                         processedBlocks++;
                         
@@ -68,21 +69,29 @@ namespace WorldGeneration.Chunks
             return combinedHeight;
         }
         
-        private static BlockType GenerateBlockTypeAt(int worldX, int worldY, int worldZ, int surfaceY, int worldSeed)
+        private static BlockType GenerateBlockTypeAt(int worldX, int worldY, int worldZ, int surfaceY, int worldSeed,
+                                                    bool enableTunnels = false, WorldGeneration.HorizontalTunnelGenerator.TunnelSettings tunnelSettings = null)
         {
             // Bedrock layer (expanded to Y=0-2)
             if (worldY <= 2) return BlockType.Bedrock;
             
-            // Air above surface
+            // Check for NEW tunnel system FIRST at all Y levels (including surface!)
+            if (enableTunnels && tunnelSettings != null && 
+                WorldGeneration.HorizontalTunnelGenerator.IsTunnelBlock(new Vector3Int(worldX, worldY, worldZ), worldSeed, tunnelSettings))
+            {
+                return BlockType.Air; // Tunnel air space
+            }
+            
+            // Air above surface (only if no tunnel)
             if (worldY > surfaceY) return BlockType.Air;
             
-            // Surface layer
+            // Surface layer (only if no tunnel)
             if (worldY == surfaceY) return BlockType.Grass;
             
-            // Subsurface layers (dirt below grass)
+            // Subsurface layers (dirt below grass, only if no tunnel)
             if (worldY >= surfaceY - 4) return BlockType.Dirt;
             
-            // Underground layers (Y 3-99) - Expanded underground generation
+            // Underground layers (Y 3-99) - Only generate solid blocks if no tunnel
             if (worldY <= 99)
             {
                 return GenerateUndergroundBlock(worldX, worldY, worldZ, worldSeed);
@@ -93,6 +102,7 @@ namespace WorldGeneration.Chunks
         
         private static BlockType GenerateUndergroundBlock(int worldX, int worldY, int worldZ, int worldSeed)
         {
+            // Tunnel check is now handled at the top level, so this only generates solid underground blocks
             float chance = GetHashedFloat(worldX, worldY, worldZ, worldSeed);
             
             // Calculate depth factor: deeper = rarer ores (Y=3 is deepest, Y=99 is shallowest)

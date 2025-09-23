@@ -20,6 +20,16 @@ public class WorldGenerator : MonoBehaviour
     [Tooltip("World seed for deterministic generation")]
     public int worldSeed = 12345;
 
+    [Header("Cave System - NEW")]
+    [Tooltip("Enable horizontal tunnel generation")]
+    public bool enableTunnels = true;
+    public WorldGeneration.HorizontalTunnelGenerator.TunnelSettings tunnelSettings = new WorldGeneration.HorizontalTunnelGenerator.TunnelSettings();
+    
+    [Header("Ore Generation System")]
+    [Tooltip("Minecraft-style chunk-based ore generation settings")]
+    public WorldGeneration.Chunks.ChunkOreGenerator.OreSettings oreSettings = new WorldGeneration.Chunks.ChunkOreGenerator.OreSettings();
+    
+
     [Header("Chunk Streaming")] 
     [Tooltip("Enable player-centered chunk streaming for infinite world")]
     public bool useChunkStreaming = true;
@@ -1112,18 +1122,57 @@ public class WorldGenerator : MonoBehaviour
         // Bedrock layer (unbreakable foundation)
         if (worldPos.y <= 2) return BlockType.Bedrock;
         
-        // Deep underground layers (Y 3-99) - Expanded from Y=0-25 to Y=0-99
+        // Check for NEW tunnel system FIRST at all Y levels
+        if (enableTunnels && WorldGeneration.HorizontalTunnelGenerator.IsTunnelBlock(worldPos, worldSeed, tunnelSettings))
+        {
+            return BlockType.Air; // Tunnel air space
+        }
+        
+        // Deep underground layers (Y 3-99) - Only generate solid blocks if no cave
         if (worldPos.y <= 99)
         {
             return GenerateUndergroundBlock(worldPos);
         }
         
-        // Surface terrain (Y 100+)
+        // Surface terrain (Y 100+) - Only generate if no cave
         return GenerateSurfaceBlock(worldPos);
     }
     
     private BlockType GenerateUndergroundBlock(Vector3Int worldPos)
     {
+        // Use new chunk-based ore generation system
+        if (oreSettings.enableChunkOreGeneration)
+        {
+            // Calculate which chunk this position belongs to
+            Vector2Int chunkCoord = new Vector2Int(
+                Mathf.FloorToInt(worldPos.x / (float)chunkSizeX),
+                Mathf.FloorToInt(worldPos.z / (float)chunkSizeZ)
+            );
+            
+            // Ensure chunk ore generation is initialized
+            WorldGeneration.Chunks.ChunkOreGenerator.GenerateChunkOreBlobs(chunkCoord, chunkSizeX, chunkSizeZ, worldSeed, oreSettings);
+            
+            // Get ore type from chunk-based system
+            BlockType oreType = WorldGeneration.Chunks.ChunkOreGenerator.GetOreAtPosition(worldPos, chunkCoord, worldSeed, oreSettings);
+            
+            if (oreType != BlockType.Stone)
+            {
+                return oreType; // Return the ore from the chunk system
+            }
+            
+            return BlockType.Stone; // Default to stone
+        }
+        
+        // Fallback to legacy random system if chunk ore generation is disabled
+        return GenerateUndergroundBlockLegacy(worldPos);
+    }
+    
+    /// <summary>
+    /// Legacy underground block generation (kept as fallback)
+    /// </summary>
+    private BlockType GenerateUndergroundBlockLegacy(Vector3Int worldPos)
+    {
+        // Original random-based ore generation
         System.Random rng = new System.Random(worldPos.x * 73856093 ^ worldPos.y * 19349663 ^ worldPos.z * 83492791 ^ worldSeed);
         float chance = (float)rng.NextDouble();
         
@@ -1612,7 +1661,7 @@ public class WorldGenerator : MonoBehaviour
     {
         // For now, use the optimized fallback system until Unity Jobs package is properly installed
         yield return StartCoroutine(WorldGeneration.Chunks.ChunkGenerationFallback.GenerateChunkAsync(
-            chunk, coord, chunkSizeX, worldHeight, chunkSizeZ, worldSeed));
+            chunk, coord, chunkSizeX, worldHeight, chunkSizeZ, worldSeed, enableTunnels, tunnelSettings));
     }
 
     private IEnumerator GenerateChunkTraditional(WorldGeneration.Chunks.Chunk chunk, Vector2Int coord)

@@ -1,0 +1,25 @@
+Cave Generation Analysis - Expected Results After Fixes:
+
+BEFORE (BROKEN):
+- caveDensity = 0.15
+- deepCaveDensity = 0.25  
+- Final density = 0.15 × 0.25 = 0.0375 (3.75%)
+- Threshold = 1 - 0.0375 = 0.9625 (96.25% threshold!)
+- Result: Almost no caves because noise rarely exceeds 96%
+
+AFTER (FIXED):
+- caveDensity = 0.6
+- deepCaveDensity = 0.6
+- Final density = max(0.6, 0.6) = 0.6 (60% directly!)
+- Threshold = 1 - 0.6 = 0.4 (40% threshold)
+- Result: 60% cave density when noise > 40%
+
+Expected cave coverage:
+- Deep caves (Y 5-40): ~60% density where noise allows
+- Mid caves (Y 40-80): ~50% density  
+- Surface caves (Y 80-95): ~30% density
+
+Cave frequency increased to 0.03 for more visible cave networks.
+All depth factors increased to reasonable levels (0.8-1.2).
+
+Debug logging enabled - look for "Cave Debug" messages in console when generating chunks.
