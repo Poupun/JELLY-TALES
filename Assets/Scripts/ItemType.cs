@@ -3,6 +3,7 @@ using UnityEngine;
 [System.Serializable]
 public enum ItemType
 {
+    None = 0,
     // Tools & Equipment
     Stick = 1000,
     WoodPickaxe = 1001,

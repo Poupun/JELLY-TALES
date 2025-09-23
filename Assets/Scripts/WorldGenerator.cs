@@ -2,25 +2,40 @@ using System.Collections.Generic;
 using System.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
+using System.Linq;
+#if UNITY_JOBS
+using Unity.Jobs;
+using Unity.Collections;
+#endif
 // PlantDefinition and PlantDatabase are in global namespace after refactor
 
 public class WorldGenerator : MonoBehaviour
 {
     [Header("World Settings")]
     public int worldWidth = 16;
-    public int worldHeight = 16;
+    public int worldHeight = 150;
     public int worldDepth = 16;
 
     [Header("World Generation")]
     [Tooltip("World seed for deterministic generation")]
     public int worldSeed = 12345;
 
+    [Header("Cave System - NEW")]
+    [Tooltip("Enable horizontal tunnel generation")]
+    public bool enableTunnels = true;
+    public WorldGeneration.HorizontalTunnelGenerator.TunnelSettings tunnelSettings = new WorldGeneration.HorizontalTunnelGenerator.TunnelSettings();
+    
+    [Header("Ore Generation System")]
+    [Tooltip("Minecraft-style chunk-based ore generation settings")]
+    public WorldGeneration.Chunks.ChunkOreGenerator.OreSettings oreSettings = new WorldGeneration.Chunks.ChunkOreGenerator.OreSettings();
+    
+
     [Header("Chunk Streaming")] 
     [Tooltip("Enable player-centered chunk streaming for infinite world")]
     public bool useChunkStreaming = true;
     [Min(4)] public int chunkSizeX = 16;
     [Min(4)] public int chunkSizeZ = 16;
-    [Min(1)] public int viewDistanceChunks = 4; // Manhattan or square radius
+    [Min(1)] public int viewDistanceChunks = 8; // Manhattan or square radius (increased for better chunk preloading)
     [Tooltip("Player transform used to center chunk streaming. If null, will try to auto-find.")]
     public Transform player;
     private Transform _chunksRoot;
@@ -28,7 +43,12 @@ public class WorldGenerator : MonoBehaviour
     private readonly Queue<Vector2Int> _pendingLoads = new Queue<Vector2Int>();
     private readonly HashSet<Vector2Int> _queued = new HashSet<Vector2Int>();
     private readonly HashSet<Vector2Int> _loading = new HashSet<Vector2Int>();
-    [Min(1)] public int maxChunkLoadsPerFrame = 1;
+    [Min(1)] public int maxChunkLoadsPerFrame = 10; // Increased for larger view distance (8 chunks)
+    [Header("Performance Optimization")]
+    [Tooltip("Enable async Job System for chunk generation")]
+    public bool useJobSystem = true; // Re-enabled for fast chunk generation
+    [Tooltip("Frame time budget in milliseconds")]
+    [Range(5f, 33f)] public float targetFrameTime = 16.67f;
     [Header("Meshing (Experimental)")]
     [Tooltip("If enabled, build one mesh per chunk instead of instantiating each block GameObject.")]
     public bool useChunkMeshing = true;
@@ -39,15 +59,18 @@ public class WorldGenerator : MonoBehaviour
     public bool enableChunkPersistence = true;
     [Tooltip("Folder name under persistent data path to store chunk saves.")]
     public string saveFolderName = "ChunkSaves";
+    [Tooltip("Current world name for save isolation - set by WorldLoader")]
+    [System.NonSerialized]
+    public string currentWorldName = "";
     
     [Header("Block Prefab")]
     public GameObject blockPrefab;
     
     [Header("Player Spawn Gating")]
     [Tooltip("If enabled, the player GameObject stays inactive until the first center chunk finishes building its mesh.")]
-    public bool delayPlayerSpawnUntilChunks = true;
+    public bool delayPlayerSpawnUntilChunks = false; // Disabled to fix spawn issues
     [Tooltip("After chunks are ready, reposition the player to stand on the highest solid block under them.")]
-    public bool snapPlayerToGroundOnSpawn = true;
+    public bool snapPlayerToGroundOnSpawn = false; // Disabled to avoid spawn issues
     
     [Header("Block Management System")]
     [Tooltip("Block textures and properties are now managed by BlockManager using BlockConfiguration assets. See Assets/Data/Blocks/ folder.")]
@@ -126,7 +149,7 @@ public class WorldGenerator : MonoBehaviour
     [Tooltip("Enable procedural tree generation (advanced)." )]
     public bool enableTrees = true;
     [Tooltip("Average number of trees per chunk (scaled by noise + randomness)." )]
-    [Min(0f)] public float treesPerChunk = 6f;
+    [Min(0f)] public float treesPerChunk = 0.15f;
     [Tooltip("Seed offset for tree placement noise.")]
     public int treeSeedOffset = 98765;
     [Header("Tree Placement")] 
@@ -329,7 +352,8 @@ public class WorldGenerator : MonoBehaviour
         {
             EnsureChunksRoot();
             AutoFindPlayer();
-            UpdateStreaming(force: true);
+            // Don't start chunk streaming until InitializeForWorld is called
+            // UpdateStreaming(force: true) will be called by InitializeForWorld
             if (delayPlayerSpawnUntilChunks)
             {
                 StartCoroutine(StartupPlayerGate());
@@ -339,6 +363,9 @@ public class WorldGenerator : MonoBehaviour
         {
             GenerateWorld();
         }
+        
+        // Note: currentWorldName will be set by WorldLoader or GameManager after Start()
+        // Persistence will be properly managed by InitializeForWorld method
     }
     
     void Update()
@@ -515,7 +542,7 @@ public class WorldGenerator : MonoBehaviour
                 _lastPlantSizeGrass = plantSizeGrass;
                 RebuildPlantsForAllLoadedChunks();
             }
-            // Start background chunk loads (limited per frame)
+            // Start background chunk loads (removed frame time restriction for faster loading)
             int budget = Mathf.Max(1, maxChunkLoadsPerFrame);
             while (budget-- > 0 && _pendingLoads.Count > 0)
             {
@@ -524,7 +551,9 @@ public class WorldGenerator : MonoBehaviour
                 if (_chunks.ContainsKey(next) || _loading.Contains(next)) continue;
                 // Mark as loading before starting coroutine to avoid races
                 _loading.Add(next);
-                StartCoroutine(LoadChunkRoutine(next));
+                
+                // Use optimized generation to prevent FPS drops
+                StartCoroutine(LoadChunkRoutineOptimized(next));
             }
             // Process a small number of deferred neighbor mesh rebuilds per frame to avoid spikes
             int rebuildBudget = 2;
@@ -1091,62 +1120,174 @@ public class WorldGenerator : MonoBehaviour
         if (worldPos.y < 0 || worldPos.y >= worldHeight) return BlockType.Air;
 
         // Bedrock layer (unbreakable foundation)
-        if (worldPos.y == 0) return BlockType.Bedrock;
+        if (worldPos.y <= 2) return BlockType.Bedrock;
         
-        // Deep underground (Y 1-12) - Stone with ores
-        if (worldPos.y <= 12)
+        // Check for NEW tunnel system FIRST at all Y levels
+        if (enableTunnels && WorldGeneration.HorizontalTunnelGenerator.IsTunnelBlock(worldPos, worldSeed, tunnelSettings))
+        {
+            return BlockType.Air; // Tunnel air space
+        }
+        
+        // Deep underground layers (Y 3-99) - Only generate solid blocks if no cave
+        if (worldPos.y <= 99)
         {
             return GenerateUndergroundBlock(worldPos);
         }
         
-        // Underground stone layer (Y 13-25)
-        if (worldPos.y <= 25)
-        {
-            // Mix of stone and some ores
-            System.Random rng = new System.Random(worldPos.x * 73856093 ^ worldPos.y * 19349663 ^ worldPos.z * 83492791 ^ worldSeed);
-            float chance = (float)rng.NextDouble();
-            
-            if (chance < 0.05f) return BlockType.Coal;
-            if (chance < 0.08f && worldPos.y <= 20) return BlockType.Iron;
-            if (chance < 0.15f) return BlockType.Gravel;
-            
-            return BlockType.Stone;
-        }
-        
-        // Surface terrain (Y 26+)
+        // Surface terrain (Y 100+) - Only generate if no cave
         return GenerateSurfaceBlock(worldPos);
     }
     
     private BlockType GenerateUndergroundBlock(Vector3Int worldPos)
     {
+        // Use new chunk-based ore generation system
+        if (oreSettings.enableChunkOreGeneration)
+        {
+            // Calculate which chunk this position belongs to
+            Vector2Int chunkCoord = new Vector2Int(
+                Mathf.FloorToInt(worldPos.x / (float)chunkSizeX),
+                Mathf.FloorToInt(worldPos.z / (float)chunkSizeZ)
+            );
+            
+            // Ensure chunk ore generation is initialized
+            WorldGeneration.Chunks.ChunkOreGenerator.GenerateChunkOreBlobs(chunkCoord, chunkSizeX, chunkSizeZ, worldSeed, oreSettings);
+            
+            // Get ore type from chunk-based system
+            BlockType oreType = WorldGeneration.Chunks.ChunkOreGenerator.GetOreAtPosition(worldPos, chunkCoord, worldSeed, oreSettings);
+            
+            if (oreType != BlockType.Stone)
+            {
+                return oreType; // Return the ore from the chunk system
+            }
+            
+            return BlockType.Stone; // Default to stone
+        }
+        
+        // Fallback to legacy random system if chunk ore generation is disabled
+        return GenerateUndergroundBlockLegacy(worldPos);
+    }
+    
+    /// <summary>
+    /// Legacy underground block generation (kept as fallback)
+    /// </summary>
+    private BlockType GenerateUndergroundBlockLegacy(Vector3Int worldPos)
+    {
+        // Original random-based ore generation
         System.Random rng = new System.Random(worldPos.x * 73856093 ^ worldPos.y * 19349663 ^ worldPos.z * 83492791 ^ worldSeed);
         float chance = (float)rng.NextDouble();
-        float depthFactor = (13f - worldPos.y) / 13f; // Deeper = rarer ores
         
-        // Diamond (very rare, only deep)
-        if (worldPos.y <= 8 && chance < 0.003f * depthFactor)
-            return BlockType.Diamond;
+        // Calculate depth factor: deeper = rarer ores (Y=3 is deepest, Y=99 is shallowest)
+        float depthFactor = (100f - worldPos.y) / 97f; // 0.0 at surface, 1.0 at deepest
         
-        // Gold (rare, deeper preferred)
-        if (worldPos.y <= 10 && chance < 0.008f * depthFactor)
-            return BlockType.Gold;
-        
-        // Iron (common)
-        if (chance < 0.06f)
-            return BlockType.Iron;
-        
-        // Coal (most common)
-        if (chance < 0.15f)
-            return BlockType.Coal;
+        // Deep Underground (Y 3-30): Deepest ores
+        if (worldPos.y <= 30)
+        {
+            // Diamond (very rare, only in deepest layers)
+            if (worldPos.y <= 20 && chance < 0.004f * depthFactor)
+                return BlockType.Diamond;
             
+            // Gold (rare, deep preferred)
+            if (worldPos.y <= 25 && chance < 0.010f * depthFactor)
+                return BlockType.Gold;
+            
+            // Iron (common at all depths)
+            if (chance < 0.08f)
+                return BlockType.Iron;
+            
+            // Coal (most common)
+            if (chance < 0.18f)
+                return BlockType.Coal;
+                
+            // Gravel pockets
+            if (chance < 0.25f)
+                return BlockType.Gravel;
+                
+            return BlockType.Stone;
+        }
+        
+        // Mid Underground (Y 31-60): Mixed ore distribution
+        if (worldPos.y <= 60)
+        {
+            // Gold (less common than deep, but still present)
+            if (chance < 0.008f * depthFactor)
+                return BlockType.Gold;
+            
+            // Iron (very common in mid layers)
+            if (chance < 0.10f)
+                return BlockType.Iron;
+            
+            // Coal (abundant)
+            if (chance < 0.20f)
+                return BlockType.Coal;
+                
+            // Gravel
+            if (chance < 0.15f)
+                return BlockType.Gravel;
+                
+            return BlockType.Stone;
+        }
+        
+        // Shallow Underground (Y 61-99): Mostly stone with some coal/iron
+        if (worldPos.y <= 99)
+        {
+            // Iron (less common near surface)
+            if (chance < 0.06f)
+                return BlockType.Iron;
+            
+            // Coal (still present but less dense)
+            if (chance < 0.12f)
+                return BlockType.Coal;
+                
+            // Gravel
+            if (chance < 0.10f)
+                return BlockType.Gravel;
+                
+            return BlockType.Stone;
+        }
+        
         return BlockType.Stone;
     }
     
     private BlockType GenerateSurfaceBlock(Vector3Int worldPos)
     {
-        // Simple height-based surface generation
-        float noise = Mathf.PerlinNoise((worldPos.x + worldSeed) * 0.02f, (worldPos.z + worldSeed) * 0.02f);
-        int surfaceHeight = Mathf.RoundToInt(28 + noise * 6); // Surface around Y=28-34
+        // Debug warning if using default seed (indicates timing issue)
+        if (worldSeed == 12345 && !string.IsNullOrEmpty(currentWorldName))
+        {
+            Debug.LogWarning($"WorldGenerator: Using default seed {worldSeed} for world '{currentWorldName}' - possible timing issue!");
+        }
+        
+        // Plains biome: mostly flat with occasional small hills
+        // Use smaller seed offset to avoid large coordinate values that break Perlin noise
+        float seedOffset = (worldSeed % 10000) * 0.01f;
+        
+        // Base flat terrain with higher default variation
+        float baseX = worldPos.x * 0.008f + seedOffset; // Slightly faster variation for more rolling terrain
+        float baseZ = worldPos.z * 0.008f + seedOffset;
+        float baseNoise = Mathf.PerlinNoise(baseX, baseZ);
+        
+        // Hill detection - smaller but more common hills
+        float hillX = worldPos.x * 0.015f + seedOffset * 1.7f; // Higher frequency for more common hills
+        float hillZ = worldPos.z * 0.015f + seedOffset * 1.7f;
+        float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
+        
+        // Very common hills (lower threshold for more frequent hills)
+        float hillMultiplier = hillNoise > 0.3f ? Mathf.Pow((hillNoise - 0.3f) / 0.7f, 1.2f) : 0f;
+        
+        // Small detail noise for micro-variations
+        float detailX = worldPos.x * 0.05f + seedOffset;
+        float detailZ = worldPos.z * 0.05f + seedOffset;
+        float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
+        
+        // Combine: higher base variation + smaller common hills + details
+        // Moved surface to Y=100-120 to allow for 100 underground levels (Y=0-99)
+        float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        int surfaceHeight = Mathf.RoundToInt(combinedHeight); // Base Y=105-115, hills up to Y=119
+        
+        // Debug logging disabled to improve performance
+        // if (worldPos.x >= -2 && worldPos.x <= 2 && worldPos.z >= -2 && worldPos.z <= 2 && worldPos.y == surfaceHeight)
+        // {
+        //     Debug.Log($"Plains Terrain - Pos: {worldPos}, baseNoise: {baseNoise:F3}, hillNoise: {hillNoise:F3}, hillMult: {hillMultiplier:F3}, detailNoise: {detailNoise:F3}, height: {surfaceHeight}, seed: {worldSeed}");
+        // }
         
         if (worldPos.y < surfaceHeight - 4) return BlockType.Stone;
         if (worldPos.y < surfaceHeight) return BlockType.Dirt;
@@ -1159,8 +1300,31 @@ public class WorldGenerator : MonoBehaviour
     public int GetColumnTopY(int worldX, int worldZ)
     {
         // Use the same surface generation logic as GenerateSurfaceBlock
-        float noise = Mathf.PerlinNoise((worldX + worldSeed) * 0.02f, (worldZ + worldSeed) * 0.02f);
-        int surfaceHeight = Mathf.RoundToInt(28 + noise * 6); // Surface around Y=28-34
+        // Plains biome: mostly flat with occasional small hills
+        float seedOffset = (worldSeed % 10000) * 0.01f;
+        
+        // Base flat terrain with higher default variation
+        float baseX = worldX * 0.008f + seedOffset; // Slightly faster variation for more rolling terrain
+        float baseZ = worldZ * 0.008f + seedOffset;
+        float baseNoise = Mathf.PerlinNoise(baseX, baseZ);
+        
+        // Hill detection - smaller but more common hills
+        float hillX = worldX * 0.015f + seedOffset * 1.7f; // Higher frequency for more common hills
+        float hillZ = worldZ * 0.015f + seedOffset * 1.7f;
+        float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
+        
+        // Very common hills (lower threshold for more frequent hills)
+        float hillMultiplier = hillNoise > 0.3f ? Mathf.Pow((hillNoise - 0.3f) / 0.7f, 1.2f) : 0f;
+        
+        // Small detail noise for micro-variations
+        float detailX = worldX * 0.05f + seedOffset;
+        float detailZ = worldZ * 0.05f + seedOffset;
+        float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
+        
+        // Combine: higher base variation + smaller common hills + details
+        // Moved surface to Y=100-120 to allow for 100 underground levels (Y=0-99)
+        float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        int surfaceHeight = Mathf.RoundToInt(combinedHeight);
         return Mathf.Min(worldHeight - 1, surfaceHeight);
     }
 
@@ -1408,6 +1572,207 @@ public class WorldGenerator : MonoBehaviour
         }
 
     _loading.Remove(coord);
+    }
+    
+    private IEnumerator LoadChunkRoutineOptimized(Vector2Int coord)
+    {
+        // No LOD system - always use full detail
+
+        // Create chunk
+        var chunk = new WorldGeneration.Chunks.Chunk(coord, chunkSizeX, worldHeight, chunkSizeZ, _chunksRoot);
+
+        // Priority 1: Use Job System for fastest generation (if enabled)
+        if (useJobSystem)
+        {
+            yield return StartCoroutine(GenerateChunkWithJobSystem(chunk, coord));
+        }
+        // Priority 2: Use ultra-smooth generation for virtually zero micro-freezes
+        else if (GetComponent<WorldGeneration.Chunks.UltraSmoothChunkGenerator>() != null)
+        {
+            var ultraSmooth = GetComponent<WorldGeneration.Chunks.UltraSmoothChunkGenerator>();
+            yield return StartCoroutine(ultraSmooth.GenerateChunkUltraSmooth(chunk, coord));
+        }
+        // Priority 3: Use optimizer as fallback
+        else
+        {
+            var optimizer = GetComponent<WorldGeneration.Chunks.ChunkGenerationOptimizer>();
+            if (optimizer != null)
+            {
+                yield return StartCoroutine(optimizer.GenerateChunkOptimized(chunk, coord));
+            }
+            else
+            {
+                // Final fallback to traditional generation
+                yield return StartCoroutine(GenerateChunkTraditionalOptimized(chunk, coord));
+            }
+        }
+
+        // Apply persisted edits
+        if (enableChunkPersistence)
+        {
+            LoadChunkFromDiskInto(coord, chunk);
+            if (_chunkEdits.TryGetValue(coord, out var edits))
+            {
+                foreach (var kv in edits)
+                {
+                    var lp = chunk.WorldToLocal(kv.Key);
+                    if (lp.x >= 0 && lp.x < chunk.sizeX && lp.y >= 0 && lp.y < chunk.sizeY && lp.z >= 0 && lp.z < chunk.sizeZ)
+                    {
+                        chunk.SetLocal(lp.x, lp.y, lp.z, kv.Value);
+                    }
+                }
+            }
+        }
+
+        // Trees generation
+        if (enableTrees)
+        {
+            _isProceduralBatch = true;
+            _batchDirtyChunks.Clear();
+            yield return GenerateTreesInChunkRoutine(chunk);
+            _isProceduralBatch = false;
+        }
+
+        // Register chunk early
+        _chunks[coord] = chunk;
+
+        // Build mesh with LOD optimization
+        if (useChunkMeshing)
+        {
+            BuildChunkMesh(chunk);
+            
+            // Build plants
+            int usefulY = Mathf.Clamp(chunk.sizeY, 1, worldHeight);
+            BuildChunkPlants(chunk, usefulY);
+            
+            // Handle neighbor rebuilds
+            HandleNeighborRebuilds(coord);
+        }
+        else
+        {
+            // Traditional visible block building with LOD filtering
+            yield return StartCoroutine(BuildVisible(chunk));
+        }
+
+        _loading.Remove(coord);
+    }
+
+    private IEnumerator GenerateChunkWithJobSystem(WorldGeneration.Chunks.Chunk chunk, Vector2Int coord)
+    {
+        // For now, use the optimized fallback system until Unity Jobs package is properly installed
+        yield return StartCoroutine(WorldGeneration.Chunks.ChunkGenerationFallback.GenerateChunkAsync(
+            chunk, coord, chunkSizeX, worldHeight, chunkSizeZ, worldSeed, enableTunnels, tunnelSettings));
+    }
+
+    private IEnumerator GenerateChunkTraditional(WorldGeneration.Chunks.Chunk chunk, Vector2Int coord)
+    {
+        // Original generation logic with yields
+        for (int lx = 0; lx < chunkSizeX; lx++)
+        {
+            for (int lz = 0; lz < chunkSizeZ; lz++)
+            {
+                int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
+                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+                for (int ly = 0; ly <= columnMaxY; ly++)
+                {
+                    var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
+                    chunk.SetLocal(lx, ly, lz, GenerateBlockTypeAt(wp));
+                }
+            }
+            if ((lx & 3) == 0) yield return null;
+        }
+    }
+    
+    private IEnumerator GenerateChunkTraditionalOptimized(WorldGeneration.Chunks.Chunk chunk, Vector2Int coord)
+    {
+        // Optimized generation with more frequent yields to prevent FPS drops
+        float frameStartTime = Time.realtimeSinceStartup;
+        int processedBlocks = 0;
+        
+        for (int lx = 0; lx < chunkSizeX; lx++)
+        {
+            for (int lz = 0; lz < chunkSizeZ; lz++)
+            {
+                int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
+                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+                for (int ly = 0; ly <= columnMaxY; ly++)
+                {
+                    var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
+                    chunk.SetLocal(lx, ly, lz, GenerateBlockTypeAt(wp));
+                    processedBlocks++;
+                    
+                    // Yield very frequently to eliminate micro-freezes
+                    if (processedBlocks >= 50 || (Time.realtimeSinceStartup - frameStartTime) * 1000f > 1f)
+                    {
+                        yield return null;
+                        frameStartTime = Time.realtimeSinceStartup;
+                        processedBlocks = 0;
+                    }
+                    
+                    // Extra yield every 500 blocks for faster generation
+                    if (processedBlocks % 500 == 0)
+                    {
+                        yield return null;
+                        frameStartTime = Time.realtimeSinceStartup;
+                    }
+                }
+            }
+        }
+    }
+
+    private void BuildChunkMesh(WorldGeneration.Chunks.Chunk chunk)
+    {
+        // Standard BuildMesh call
+        WorldGeneration.Chunks.ChunkMeshBuilder.BuildMesh(this, chunk, addChunkCollider);
+    }
+
+    private IEnumerator BuildVisible(WorldGeneration.Chunks.Chunk chunk)
+    {
+        int usefulY = Mathf.Clamp(chunk.sizeY, 1, worldHeight);
+        
+        for (int lx = 0; lx < chunkSizeX; lx++)
+        {
+            for (int ly = 0; ly < usefulY; ly++)
+            {
+                for (int lz = 0; lz < chunkSizeZ; lz++)
+                {
+                    var t = chunk.GetLocal(lx, ly, lz);
+                    if (t == BlockType.Air) continue;
+                    
+                    // No LOD filtering - render all blocks
+                    
+                    var wp = new Vector3Int(chunk.coord.x * chunkSizeX + lx, ly, chunk.coord.y * chunkSizeZ + lz);
+                    if (ShouldRenderBlock(wp.x, wp.y, wp.z))
+                    {
+                        CreateBlock(wp, t, chunk.parent);
+                    }
+                }
+            }
+            if ((lx & 3) == 0) yield return null;
+        }
+    }
+
+    private void HandleNeighborRebuilds(Vector2Int coord)
+    {
+        if (_batchDirtyChunks.Count > 0)
+        {
+            foreach (var dc in _batchDirtyChunks)
+            {
+                if (dc != coord)
+                {
+                    _deferredRebuild.Add(dc);
+                }
+            }
+            _batchDirtyChunks.Clear();
+        }
+
+        // Request neighbor chunks to rebuild for proper border culling
+        Vector2Int[] ortho = { new Vector2Int(1,0), new Vector2Int(-1,0), new Vector2Int(0,1), new Vector2Int(0,-1) };
+        foreach (var o in ortho)
+        {
+            var nc = new Vector2Int(coord.x + o.x, coord.y + o.y);
+            if (_chunks.ContainsKey(nc)) _deferredRebuild.Add(nc);
+        }
     }
     
     void UpdateVisibleBlocks()
@@ -1906,10 +2271,15 @@ public class WorldGenerator : MonoBehaviour
             }
             var lp = chunk.WorldToLocal(position);
             chunk.SetLocal(lp.x, lp.y, lp.z, blockType);
-            if (enableChunkPersistence)
+            if (enableChunkPersistence && !string.IsNullOrEmpty(currentWorldName))
             {
                 if (!_chunkEdits.TryGetValue(cc, out var map)) { map = new Dictionary<Vector3Int, BlockType>(); _chunkEdits[cc] = map; }
                 map[position] = blockType;
+                Debug.Log($"WorldGenerator: Recorded block change at {position} to {blockType} in world '{currentWorldName}' (Chunk {cc})");
+            }
+            else
+            {
+                Debug.LogWarning($"WorldGenerator: Block change at {position} NOT recorded - persistence disabled: {!enableChunkPersistence} or world name empty: '{currentWorldName}'");
             }
         }
         else
@@ -2409,9 +2779,18 @@ public class WorldGenerator : MonoBehaviour
         }
     }
 
+    private void OnDestroy()
+    {
+        // Save chunks when WorldGenerator is about to be destroyed (e.g., scene switch)
+        SaveAllLoadedChunks();
+        Debug.Log("WorldGenerator: OnDestroy - saved chunks before destruction");
+    }
+    
     private void OnApplicationQuit()
     {
         if (!enableChunkPersistence) return;
+        if (string.IsNullOrEmpty(currentWorldName)) return; // Can't save without world name
+        
         // Save every loaded chunk's edits to disk
         foreach (var kv in _chunks)
         {
@@ -2559,17 +2938,32 @@ public class WorldGenerator : MonoBehaviour
             yield return null;
         }
 
-        // Optionally snap player to ground
+        // Optionally snap player to ground (only for new worlds without saved player data)
         if (snapPlayerToGroundOnSpawn)
         {
-            var p = player.position;
-            int x = Mathf.FloorToInt(p.x);
-            int z = Mathf.FloorToInt(p.z);
-            int gy = FindHighestSolidYAt(x, z);
-            if (gy >= 0)
+            bool hasSavedPlayerData = false;
+            if (WorldSaveManager.Instance != null)
             {
-                // place a bit above ground to avoid collisions
-                player.position = new Vector3(p.x, gy + 1.6f, p.z);
+                var currentWorld = WorldSaveManager.Instance.GetCurrentWorldData();
+                hasSavedPlayerData = (currentWorld != null && currentWorld.playerPosition != Vector3.zero);
+            }
+            
+            if (!hasSavedPlayerData)
+            {
+                var p = player.position;
+                int x = Mathf.FloorToInt(p.x);
+                int z = Mathf.FloorToInt(p.z);
+                int gy = FindHighestSolidYAt(x, z);
+                if (gy >= 0)
+                {
+                    // place a bit above ground to avoid collisions
+                    player.position = new Vector3(p.x, gy + 1.6f, p.z);
+                    Debug.Log($"WorldGenerator: Player snapped to ground at Y={gy + 1.6f} (new world, no saved position)");
+                }
+            }
+            else
+            {
+                Debug.Log($"WorldGenerator: Player position preserved from save data, skipping ground snap");
             }
         }
 
@@ -2752,17 +3146,142 @@ public class WorldGenerator : MonoBehaviour
     // ---------- Persistence helpers ----------
     private string GetSaveFolderPath()
     {
-        return System.IO.Path.Combine(Application.persistentDataPath, saveFolderName);
+        if (string.IsNullOrEmpty(currentWorldName))
+        {
+            // World name not set yet - this is normal during startup
+            return null; // Return null to disable persistence when world name is not set
+        }
+        
+        // Create world-specific subfolder
+        return System.IO.Path.Combine(Application.persistentDataPath, saveFolderName, currentWorldName);
     }
 
     private string GetChunkSavePath(Vector2Int coord)
     {
-        return System.IO.Path.Combine(GetSaveFolderPath(), $"chunk_{coord.x}_{coord.y}.json");
+        string folderPath = GetSaveFolderPath();
+        if (string.IsNullOrEmpty(folderPath)) return null;
+        return System.IO.Path.Combine(folderPath, $"chunk_{coord.x}_{coord.y}.json");
+    }
+    
+    // Public method to clear all chunk data for debugging (useful after fixing seed timing issues)
+    [ContextMenu("Clear All World Chunks")]
+    public void ClearAllWorldChunks()
+    {
+        Debug.Log("WorldGenerator: Manually clearing all world chunks for debugging");
+        ClearAllChunks();
+        WorldSaveManager.Instance?.ClearDefaultChunkData();
+        if (!string.IsNullOrEmpty(currentWorldName))
+        {
+            WorldSaveManager.Instance?.ClearWorldChunkData(currentWorldName);
+        }
+    }
+    
+    // Public method to set the world name and clear existing world data
+    public void InitializeForWorld(string worldName)
+    {
+        Debug.Log($"WorldGenerator: Initializing for world '{worldName}' (current: '{currentWorldName}')");
+        
+        // Store the previous world name for saving
+        string previousWorldName = currentWorldName;
+        
+        // Only clear chunks if we're switching to a different world
+        if (!string.IsNullOrEmpty(previousWorldName) && previousWorldName != worldName)
+        {
+            Debug.Log($"WorldGenerator: Switching from '{previousWorldName}' to '{worldName}' - saving current chunks then clearing");
+            // currentWorldName is still set to the previous world for saving
+            SaveAllLoadedChunks(); // Save current world's chunks before clearing
+            ClearAllChunks();
+        }
+        else if (string.IsNullOrEmpty(previousWorldName))
+        {
+            Debug.Log($"WorldGenerator: First world initialization for '{worldName}' - clearing any existing chunks");
+            ClearAllChunks();
+        }
+        else
+        {
+            Debug.Log($"WorldGenerator: Reloading same world '{worldName}' - keeping existing chunks");
+        }
+        
+        // Now set the new world name
+        currentWorldName = worldName;
+        
+        // Re-enable persistence if it was disabled due to missing world name
+        if (!enableChunkPersistence)
+        {
+            Debug.Log("WorldGenerator: Re-enabling chunk persistence now that world name is set");
+            enableChunkPersistence = true;
+        }
+        
+        // Now that world name is set, start chunk streaming if enabled
+        if (useChunkStreaming)
+        {
+            Debug.Log($"WorldGenerator: Starting chunk streaming for world '{worldName}' with seed {worldSeed}");
+            UpdateStreaming(force: true);
+        }
+    }
+    
+    // Public method to save all loaded chunks - called by GameManager when saving
+    public void SaveAllLoadedChunks()
+    {
+        if (!enableChunkPersistence) 
+        {
+            Debug.LogWarning($"WorldGenerator: SaveAllLoadedChunks called but persistence disabled");
+            return;
+        }
+        if (string.IsNullOrEmpty(currentWorldName)) 
+        {
+            Debug.LogWarning($"WorldGenerator: SaveAllLoadedChunks called but currentWorldName is empty");
+            return;
+        }
+        
+        int editsCount = _chunkEdits.Values.Sum(dict => dict.Count);
+        Debug.Log($"WorldGenerator: SaveAllLoadedChunks called - {_chunks.Count} loaded chunks, {editsCount} total edits for world '{currentWorldName}'");
+        
+        int savedChunks = 0;
+        foreach (var kv in _chunks)
+        {
+            if (_chunkEdits.TryGetValue(kv.Key, out var edits) && edits.Count > 0)
+            {
+                SaveChunkToDisk(kv.Key);
+                savedChunks++;
+                Debug.Log($"WorldGenerator: Saved chunk {kv.Key} with {edits.Count} edits");
+            }
+        }
+        
+        Debug.Log($"WorldGenerator: Completed saving {savedChunks} chunks with modifications for world '{currentWorldName}'");
+    }
+    
+    private void ClearAllChunks()
+    {
+        int chunksToDelete = _chunks.Count;
+        int editsToDelete = _chunkEdits.Values.Sum(dict => dict.Count);
+        Debug.Log($"WorldGenerator: ClearAllChunks called - clearing {chunksToDelete} chunks and {editsToDelete} edits");
+        
+        // Stop any pending loads
+        _pendingLoads.Clear();
+        _queued.Clear();
+        _loading.Clear();
+        
+        // Destroy existing chunk GameObjects
+        foreach (var chunk in _chunks.Values)
+        {
+            if (chunk?.parentGO != null)
+            {
+                DestroyImmediate(chunk.parentGO);
+            }
+        }
+        
+        // Clear chunk dictionary and edit history
+        _chunks.Clear();
+        _chunkEdits.Clear();
+        
+        Debug.Log($"WorldGenerator: Cleared {chunksToDelete} chunks and {editsToDelete} edits from memory");
     }
 
     private void EnsureSaveFolder()
     {
         var dir = GetSaveFolderPath();
+        if (string.IsNullOrEmpty(dir)) return;
         if (!System.IO.Directory.Exists(dir)) System.IO.Directory.CreateDirectory(dir);
     }
 
@@ -2770,6 +3289,14 @@ public class WorldGenerator : MonoBehaviour
     {
         if (!enableChunkPersistence) return;
         if (!_chunkEdits.TryGetValue(coord, out var map) || map.Count == 0) return;
+        
+        string savePath = GetChunkSavePath(coord);
+        if (string.IsNullOrEmpty(savePath))
+        {
+            Debug.LogWarning($"Cannot save chunk {coord} - world name not set");
+            return;
+        }
+        
         EnsureSaveFolder();
     var data = new ChunkSaveDTO
         {
@@ -2786,17 +3313,25 @@ public class WorldGenerator : MonoBehaviour
         data.changes[i++] = new ChangedCellDTO { x = kv.Key.x, y = kv.Key.y, z = kv.Key.z, t = (int)kv.Value };
         }
         var json = JsonUtility.ToJson(data, false);
-        System.IO.File.WriteAllText(GetChunkSavePath(coord), json);
+        System.IO.File.WriteAllText(savePath, json);
+        Debug.Log($"WorldGenerator: Saved chunk {coord} with {map.Count} changes to {savePath} for world '{currentWorldName}'");
     }
 
     private void LoadChunkFromDiskInto(Vector2Int coord, WorldGeneration.Chunks.Chunk chunk)
     {
         if (!enableChunkPersistence) return;
         var path = GetChunkSavePath(coord);
+        if (string.IsNullOrEmpty(path)) return; // World name not set, can't load
         if (!System.IO.File.Exists(path)) return;
         var json = System.IO.File.ReadAllText(path);
     var data = JsonUtility.FromJson<ChunkSaveDTO>(json);
-        if (data?.changes == null) return;
+        if (data?.changes == null) 
+        {
+            Debug.LogWarning($"WorldGenerator: No changes found in chunk file {path}");
+            return;
+        }
+        
+        Debug.Log($"WorldGenerator: Loading chunk {coord} with {data.changes.Length} changes from {path} for world '{currentWorldName}'");
         foreach (var c in data.changes)
         {
             var wp = new Vector3Int(c.x, c.y, c.z);

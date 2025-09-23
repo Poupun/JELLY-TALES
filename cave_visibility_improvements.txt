@@ -1,0 +1,45 @@
+🕳️ CAVE VISIBILITY IMPROVEMENTS APPLIED
+
+PROBLEM: Caves were generating underground but not visible from surface.
+
+SOLUTIONS IMPLEMENTED:
+
+1. 🚪 SURFACE CAVE ENTRANCES
+   - Added IsSurfaceCaveEntrance() function
+   - Generates visible cave openings at Y=100-115 (surface level)
+   - Creates 4-block radius entrances on 8-block grid
+   - Entrances taper from surface down into underground caves
+
+2. 🌍 EXTENDED CAVE RANGE  
+   - maxCaveDepth: 95 → 115 (now extends above surface)
+   - Caves now generate at Y=5-115 (breaks through surface)
+   - Surface caves at Y=100-115 are fully visible
+
+3. 🔍 IMPROVED SURFACE CAVE DENSITY
+   - surfaceCaveDensity: 0.3 → 0.4 (more surface caves)
+   - Surface caves at Y≥100 get full density (40%)
+   - Surface entrance threshold: 0.85 → 0.75 (25% more entrances)
+
+4. 🎯 ENHANCED DEPTH FACTORS
+   - Surface caves (Y≥100): Full 1.0 strength
+   - All depth factors improved for visibility
+   - No more weak surface cave generation
+
+5. 📊 DEBUG LOGGING FOR CAVE FINDING
+   - "🕳️ SURFACE CAVE FOUND" - logs all surface caves
+   - "🚪 CAVE ENTRANCE GENERATED" - logs all entrances  
+   - Coordinates provided to help you locate caves
+
+HOW TO FIND CAVES NOW:
+1. Generate new chunks (caves won't appear in existing chunks)
+2. Look for holes/openings in the terrain at surface level
+3. Check Unity Console for cave coordinates:
+   - Look for "🕳️ SURFACE CAVE FOUND at (x,y,z)"
+   - Look for "🚪 CAVE ENTRANCE GENERATED at (x,y,z)"
+4. Dig down at those coordinates to find cave systems
+
+EXPECTED RESULTS:
+- Visible cave entrances every ~64-128 blocks
+- Cave openings that lead into underground networks  
+- Surface terrain with natural cave holes
+- Debug coordinates to guide you to caves

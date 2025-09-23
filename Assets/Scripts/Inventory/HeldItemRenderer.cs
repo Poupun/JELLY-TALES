@@ -862,11 +862,11 @@ public class HeldItemRenderer : MonoBehaviour
         lastCameraRotation = currentCameraRotation;
         lastCameraPosition = currentCameraPosition;
         
-        // Debug info
-        if (Application.isPlaying && (positionVelocity.magnitude > 0.1f || rotationVelocity.magnitude > 5f))
-        {
-            Debug.Log($"[CameraSway] PosVel: {positionVelocity:F2}, RotVel: {rotationVelocity:F1}, SwayOffset: {cameraSwayOffset:F3}");
-        }
+        // Debug info (disabled to reduce console spam)
+        // if (Application.isPlaying && (positionVelocity.magnitude > 0.1f || rotationVelocity.magnitude > 5f))
+        // {
+        //     Debug.Log($"[CameraSway] PosVel: {positionVelocity:F2}, RotVel: {rotationVelocity:F1}, SwayOffset: {cameraSwayOffset:F3}");
+        // }
     }
     
     float GetSwitchAnimationOffset()

@@ -1973,97 +1973,22 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   worldWidth: 16
-  worldHeight: 200
-  worldDepth: 120
+  worldHeight: 102
+  worldDepth: 100
   worldSeed: 12345
-  enableTunnels: 1
-  tunnelSettings:
-    enableTunnels: 1
-    tunnelSpacing: 0.162
-    tunnelDensity: 0.373
-    minTunnelDepth: 1
-    maxTunnelDepth: 120
-    tunnelWidth: 4.3
-    tunnelHeight: 3.48
-    widthVariation: 0.601
-    branchingFrequency: 0.73
-    directionScale: 0.0562
-    windiness: 0.875
-    networkA_CenterY: 15
-    networkA_MaxY: 35
-    networkC_CenterY: 55
-    networkC_MaxY: 70
-    networkY_CenterY: 85
-    networkA_Spacing: 0.3
-    networkA_Density: 0.641
-    networkA_Width: 3
-    networkA_Height: 4.51
-    networkA_Branching: 0.5
-    networkA_Windiness: 0.6
-    networkC_Spacing: 0.4
-    networkC_Density: 0.3
-    networkC_Width: 2.5
-    networkC_Height: 2
-    networkC_Branching: 0.4
-    networkC_Windiness: 0.5
-    networkY_Spacing: 0.613
-    networkY_Density: 0.29
-    networkY_Width: 2.56
-    networkY_Height: 4.31
-    networkY_Branching: 0.3
-    networkY_Windiness: 0.4
-    enableConnectorTunnels: 1
-    connectorFrequency: 0.724
-    connectorWidth: 2.56
-    connectorHeight: 2.25
-    connectorCurviness: 0.7
-    connectorLengthVariation: 0
-    enableCaveEntrances: 1
-    entranceFrequency: 0.401
-    entranceWidth: 4
-    entranceDepth: 15
-    entranceOrganicness: 0.6
-    entranceSteepness: 0.4
-    enableDebugLogging: 1
-  oreSettings:
-    enableChunkOreGeneration: 1
-    coalBlobsPerChunk: 10
-    coalBlobSize: 2
-    coalPeakY: 70
-    coalYRange: 100
-    ironBlobsPerChunk: 7
-    ironBlobSize: 1.5
-    ironPeakY: 50
-    ironYRange: 100
-    goldBlobsPerChunk: 2
-    goldBlobSize: 1.23
-    goldPeakY: 18
-    goldYRange: 20
-    diamondBlobsPerChunk: 0.64
-    diamondBlobSize: 1
-    diamondPeakY: 12
-    diamondYRange: 10
-    gravelPocketsPerChunk: 1.3333334
-    gravelPocketSize: 12
-    blobIrregularity: 0.4
-    enableLargeVeins: 1
-    largeVeinFrequency: 0.01
-    enableDebugLogging: 0
   useChunkStreaming: 1
   chunkSizeX: 16
   chunkSizeZ: 16
   viewDistanceChunks: 8
   player: {fileID: 1426170050}
   maxChunkLoadsPerFrame: 1
-  useJobSystem: 0
-  targetFrameTime: 16.67
   useChunkMeshing: 1
   addChunkCollider: 1
   enableChunkPersistence: 1
   saveFolderName: ChunkSaves
   blockPrefab: {fileID: 8370143156882375915, guid: 80ba404bf0581704bb0ca88f410774a6, type: 3}
-  delayPlayerSpawnUntilChunks: 0
-  snapPlayerToGroundOnSpawn: 0
+  delayPlayerSpawnUntilChunks: 1
+  snapPlayerToGroundOnSpawn: 1
   _useNewBlockSystem: 1
   grassTexture: {fileID: 2800000, guid: 066d2f2f39512774da5b727fe4ff791f, type: 3}
   grassSideTexture: {fileID: 2800000, guid: 063390b76bb116d498c69cd9e8fb611d, type: 3}
@@ -2092,7 +2017,7 @@ MonoBehaviour:
   bottomShade: 0.7
   variationStrength: 0.143
   enableTrees: 1
-  treesPerChunk: 0.14
+  treesPerChunk: 3
   treeSeedOffset: 98765
   treeGridSize: 6
   minTrunkHeight: 6

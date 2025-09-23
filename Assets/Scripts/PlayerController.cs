@@ -44,6 +44,10 @@ public class PlayerController : MonoBehaviour
     private Vector3 velocity; 
     private Vector3 horizontalVelocity; // Separate horizontal velocity for physics-based movement
     private float xRotation = 0f; private bool isSprinting; private bool isCrouching; private float currentSpeed; private float baseFOV; private float targetHeight;
+    
+    // Noclip state
+    private bool isNoclip = false;
+    private float noclipSpeed = 10f;
 
     // Events
     public event Action<BlockType, Vector3Int> OnBlockPlaced; // Fired when player successfully places a block
@@ -437,7 +441,21 @@ public class PlayerController : MonoBehaviour
     // Add hover checking for dropped items
     void Update()
     {
-        HandleMouseLook(); HandleMovementState(); HandleMovement(); HandleInteraction(); UpdateCrouchHeight(); UpdateSprintFOV();
+        // Handle F8 noclip toggle
+        HandleNoclipToggle();
+        
+        HandleMouseLook(); 
+        
+        if (isNoclip)
+        {
+            HandleNoclipMovement();
+        }
+        else
+        {
+            HandleMovementState(); HandleMovement(); UpdateCrouchHeight(); UpdateSprintFOV();
+        }
+        
+        HandleInteraction();
         
         // Handle item dropping
         HandleItemDrop();
@@ -612,6 +630,64 @@ public class PlayerController : MonoBehaviour
 
     // Block highlighting system removed
 
+    private void HandleNoclipToggle()
+    {
+        if (Input.GetKeyDown(KeyCode.F8))
+        {
+            isNoclip = !isNoclip;
+            
+            if (isNoclip)
+            {
+                Debug.Log("PlayerController: Noclip ENABLED - Flying through blocks");
+                // Reset velocity when entering noclip
+                velocity = Vector3.zero;
+                horizontalVelocity = Vector3.zero;
+                // Disable collision
+                characterController.enabled = false;
+            }
+            else
+            {
+                Debug.Log("PlayerController: Noclip DISABLED - Normal physics");
+                // Re-enable collision
+                characterController.enabled = true;
+                // Reset states
+                velocity = Vector3.zero;
+                horizontalVelocity = Vector3.zero;
+            }
+        }
+    }
+    
+    private void HandleNoclipMovement()
+    {
+        float horizontal = Input.GetAxisRaw("Horizontal");
+        float vertical = Input.GetAxisRaw("Vertical");
+        float upDown = 0f;
+        
+        // Use Space for up, Left Shift for down (or crouch key)
+        if (Input.GetKey(KeyCode.Space)) upDown = 1f;
+        if (Input.GetKey(crouchKey)) upDown = -1f;
+        
+        // Calculate movement direction
+        Vector3 direction = (transform.right * horizontal + transform.forward * vertical + Vector3.up * upDown).normalized;
+        
+        // Apply speed multiplier if sprinting
+        float currentNoclipSpeed = noclipSpeed;
+        if (Input.GetKey(sprintKey))
+        {
+            currentNoclipSpeed *= 2f; // Double speed when sprinting
+        }
+        
+        // Move directly through transform (no collision)
+        Vector3 movement = direction * currentNoclipSpeed * Time.deltaTime;
+        transform.position += movement;
+        
+        // Debug noclip movement
+        if (movement.magnitude > 0.01f && Time.frameCount % 60 == 0)
+        {
+            Debug.Log($"PlayerController: Noclip flying at {currentNoclipSpeed:F1} units/sec");
+        }
+    }
+
     // Public getters
-    public bool IsSprinting() => isSprinting; public bool IsCrouching() => isCrouching; public float GetCurrentSpeed() => currentSpeed;
+    public bool IsSprinting() => isSprinting; public bool IsCrouching() => isCrouching; public float GetCurrentSpeed() => currentSpeed; public bool IsNoclip() => isNoclip;
 }
