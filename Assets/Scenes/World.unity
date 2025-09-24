@@ -528,6 +528,20 @@ RectTransform:
   m_AnchoredPosition: {x: 1113, y: -3}
   m_SizeDelta: {x: 1000, y: 700}
   m_Pivot: {x: 0.5, y: 0.5}
+--- !u!134 &213924753
+PhysicsMaterial:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: ' (Instance) (Instance) (Instance) (Instance) (Instance) (Instance) (Instance)
+    (Instance) (Instance) (Instance)'
+  serializedVersion: 2
+  m_DynamicFriction: 0.6
+  m_StaticFriction: 0.6
+  m_Bounciness: 0
+  m_FrictionCombine: 0
+  m_BounceCombine: 0
 --- !u!1 &422596004 stripped
 GameObject:
   m_CorrespondingSourceObject: {fileID: 7973261085603349039, guid: 9a0b0df0ff12a404abef0bac44e0176b, type: 3}
@@ -1975,7 +1989,7 @@ MonoBehaviour:
   worldWidth: 16
   worldHeight: 200
   worldDepth: 120
-  worldSeed: 12345
+  worldSeed: 33333
   enableTunnels: 1
   tunnelSettings:
     enableTunnels: 1
@@ -2091,6 +2105,11 @@ MonoBehaviour:
   northSouthShade: 0.85
   bottomShade: 0.7
   variationStrength: 0.143
+  oceanCoverage: 0.925
+  seaLevel: 95
+  maxOceanDepth: 40
+  oceanWaterColor: {r: 0.2, g: 0.6, b: 1, a: 1}
+  waterTransparency: 1.06
   enableTrees: 1
   treesPerChunk: 0.14
   treeSeedOffset: 98765
@@ -2151,7 +2170,7 @@ MonoBehaviour:
   plantSizeGrass: 1
   clearSavedEditsOnReload: 0
   reseedOnReload: 0
-  triggerReloadInPlay: 0
+  triggerReloadInPlay: 1
   tickIntervalSeconds: 0.5
   plantRespawnDelayTicks: 5
   newGrassPlantDelayTicks: 5
@@ -4276,7 +4295,7 @@ CharacterController:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1426170045}
-  m_Material: {fileID: 2101781299}
+  m_Material: {fileID: 213924753}
   m_IncludeLayers:
     serializedVersion: 2
     m_Bits: 0
@@ -4303,7 +4322,7 @@ Transform:
   m_GameObject: {fileID: 1426170045}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 8, y: 10, z: 8}
+  m_LocalPosition: {x: 50, y: 80, z: 50}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -6722,20 +6741,6 @@ RectTransform:
   m_AnchoredPosition: {x: 0, y: 0}
   m_SizeDelta: {x: 100, y: 100}
   m_Pivot: {x: 0.5, y: 0.5}
---- !u!134 &2101781299
-PhysicsMaterial:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_Name: ' (Instance) (Instance) (Instance) (Instance) (Instance) (Instance) (Instance)
-    (Instance)'
-  serializedVersion: 2
-  m_DynamicFriction: 0.6
-  m_StaticFriction: 0.6
-  m_Bounciness: 0
-  m_FrictionCombine: 0
-  m_BounceCombine: 0
 --- !u!1 &2112105359
 GameObject:
   m_ObjectHideFlags: 0

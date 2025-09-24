@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 namespace WorldGeneration.Chunks
@@ -39,6 +40,184 @@ namespace WorldGeneration.Chunks
             new Vector2(0,0), new Vector2(0,1), new Vector2(1,1), new Vector2(1,0)
         };
 
+
+        private static bool ShouldRenderFace(BlockType currentBlock, BlockType neighborBlock, int faceDirection, WorldGenerator world)
+        {
+            // Always render faces against air
+            if (neighborBlock == BlockType.Air)
+                return true;
+
+            // Special handling for water blocks - strategic interior face rendering
+            if (currentBlock == BlockType.Water)
+            {
+                // Don't render water faces against sand to prevent Z-fighting
+                if (neighborBlock == BlockType.Sand)
+                    return false;
+
+                // Always render faces against other non-water blocks
+                if (neighborBlock != BlockType.Water)
+                    return true;
+
+                // For water-to-water faces, selectively render to show depth layers
+                // This will be handled in the main mesh building loop
+                return false;
+            }
+
+            // For solid blocks: always render faces against water (for underwater visibility)
+            if (neighborBlock == BlockType.Water)
+                return true;
+
+            // Default behavior: don't render faces between opaque blocks
+            if (world != null && world.IsBlockOpaque(neighborBlock))
+                return false;
+
+            // Render faces against non-opaque blocks (like leaves)
+            return true;
+        }
+
+        private static Dictionary<int, Material> _waterDepthMaterials = new Dictionary<int, Material>();
+
+        private static Material GetWaterFogMaterial(WorldGenerator world, float depthFromSurface)
+        {
+            // Create depth-based material categories for fog effect
+            int depthCategory = Mathf.FloorToInt(depthFromSurface / 3f); // Every 3 blocks = new depth category
+            depthCategory = Mathf.Clamp(depthCategory, 0, 6); // Limit to 7 categories (0-18 blocks)
+
+            // Check if we already have a material for this depth
+            if (_waterDepthMaterials.TryGetValue(depthCategory, out Material cachedMaterial))
+            {
+                return cachedMaterial;
+            }
+
+            // Create new depth-specific material
+            Material baseMaterial = world.GetBlockMaterial(BlockType.Water);
+            if (baseMaterial == null) return null;
+
+            // Create a new material instance for this depth
+            Material depthMaterial = new Material(baseMaterial);
+            depthMaterial.name = $"WaterFog_Depth_{depthCategory}";
+
+            // Use emission to simulate depth fog - deeper = less emission = darker
+            Color baseColor = baseMaterial.color;
+            float fogIntensity = Mathf.Clamp01(1f - (depthCategory * 0.35f)); // Reduce brightness by 35% per category
+
+            // Create depth fog color
+            Color fogColor = new Color(
+                baseColor.r * fogIntensity,
+                baseColor.g * fogIntensity,
+                baseColor.b * Mathf.Clamp01(fogIntensity + 0.2f), // Keep some blue
+                baseColor.a
+            );
+
+            // Apply fog via emission (this affects brightness)
+            Color emissionColor = fogColor * 0.3f; // Emission intensity
+            depthMaterial.SetColor("_EmissionColor", emissionColor);
+            depthMaterial.EnableKeyword("_EMISSION");
+
+            // Also adjust base color
+            depthMaterial.color = fogColor;
+            depthMaterial.SetColor("_BaseColor", fogColor);
+
+            // Cache the material for reuse
+            _waterDepthMaterials[depthCategory] = depthMaterial;
+
+            Debug.Log($"Created water fog material: depth {depthFromSurface:F1} -> category {depthCategory}, fog {fogIntensity:F2}, emission {emissionColor}");
+
+            return depthMaterial;
+        }
+
+        private static Material GetWaterMaterialForDepth(WorldGenerator world, float depthFromSurface)
+        {
+            // Create depth-based material categories
+            int depthCategory = Mathf.FloorToInt(depthFromSurface / 5f); // Every 5 blocks = new depth category
+            depthCategory = Mathf.Clamp(depthCategory, 0, 4); // Limit to 5 categories (0-20 blocks)
+
+            // Check if we already have a material for this depth
+            if (_waterDepthMaterials.TryGetValue(depthCategory, out Material cachedMaterial))
+            {
+                return cachedMaterial;
+            }
+
+            // Create new depth-specific material
+            Material baseMaterial = world.GetBlockMaterial(BlockType.Water);
+            if (baseMaterial == null) return null;
+
+            // Create a new material instance for this depth
+            Material depthMaterial = new Material(baseMaterial);
+            depthMaterial.name = $"Water_Depth_{depthCategory}";
+
+            // Adjust color and transparency based on depth category
+            Color baseColor = baseMaterial.color;
+            float depthDarkening = 1f - (depthCategory * 0.25f); // 25% darker per category
+            float depthTransparency = Mathf.Clamp01(baseColor.a + (depthCategory * 0.1f)); // More opaque with depth
+
+            Color depthColor = new Color(
+                baseColor.r * depthDarkening * 0.3f, // Reduce red significantly
+                baseColor.g * depthDarkening * 0.6f, // Reduce green moderately
+                baseColor.b * Mathf.Clamp01(1f - depthCategory * 0.1f), // Keep blue, slight reduction
+                depthTransparency
+            );
+
+            depthMaterial.color = depthColor;
+            depthMaterial.SetColor("_BaseColor", depthColor);
+
+            // Cache the material for reuse
+            _waterDepthMaterials[depthCategory] = depthMaterial;
+
+            return depthMaterial;
+        }
+
+        private static float CalculateDistanceFromShore(WorldGenerator world, int worldX, int worldZ, int waterSurfaceLevel)
+        {
+            if (world == null) return 0f;
+
+            // Simple approximation: check nearby blocks for non-water blocks
+            int checkRadius = 8; // Check 8 blocks in each direction
+            int nonWaterCount = 0;
+            int totalChecked = 0;
+
+            for (int dx = -checkRadius; dx <= checkRadius; dx += 2) // Skip every other block for performance
+            {
+                for (int dz = -checkRadius; dz <= checkRadius; dz += 2)
+                {
+                    int checkX = worldX + dx;
+                    int checkZ = worldZ + dz;
+
+                    // Check if this position has land above water level
+                    BlockType surfaceBlock = world.GetBlockType(new Vector3Int(checkX, waterSurfaceLevel + 1, checkZ));
+                    BlockType atWaterLevel = world.GetBlockType(new Vector3Int(checkX, waterSurfaceLevel, checkZ));
+
+                    if (surfaceBlock != BlockType.Air || atWaterLevel != BlockType.Water)
+                    {
+                        nonWaterCount++;
+                    }
+                    totalChecked++;
+                }
+            }
+
+            // Return proportion of non-water blocks nearby (0 = deep ocean, 1 = near shore)
+            return totalChecked > 0 ? 1f - ((float)nonWaterCount / totalChecked) : 0f;
+        }
+
+        private static float CalculateWaterDepth(WorldGenerator world, int worldX, int waterY, int worldZ)
+        {
+            if (world == null) return 0f;
+
+            // Find the water surface (highest water block at this x,z position)
+            int waterSurface = waterY;
+            for (int y = waterY + 1; y < world.worldHeight; y++)
+            {
+                BlockType blockAbove = world.GetBlockType(new Vector3Int(worldX, y, worldZ));
+                if (blockAbove == BlockType.Water)
+                    waterSurface = y;
+                else
+                    break; // Hit air or solid block
+            }
+
+            // Depth is distance from surface to current water block
+            return Mathf.Max(0f, waterSurface - waterY);
+        }
+
         public static void BuildMesh(WorldGenerator world, Chunk chunk, bool addCollider)
         {
             if (world == null || chunk == null) return;
@@ -78,6 +257,7 @@ namespace WorldGeneration.Chunks
                         var t = chunk.GetLocal(x, y, z);
                         if (t == BlockType.Air) continue;
 
+
                         // Remove LOD filtering to restore original functionality
 
                         // Local pos of this block's origin (mesh is in chunk parent's local space)
@@ -95,28 +275,69 @@ namespace WorldGeneration.Chunks
                             }
                             else if (world != null)
                             {
-                                int worldX = chunk.coord.x * chunk.sizeX + nx;
-                                int worldY = ny;
-                                int worldZ = chunk.coord.y * chunk.sizeZ + nz;
+                                // Fix coordinate calculation for chunk boundaries
+                                int worldX = chunk.coord.x * chunk.sizeX + x + dir.x;
+                                int worldY = y + dir.y;
+                                int worldZ = chunk.coord.y * chunk.sizeZ + z + dir.z;
                                 if (worldY >= 0 && worldY < world.worldHeight)
                                 {
                                     neighbor = world.GetBlockType(new Vector3Int(worldX, worldY, worldZ));
+
                                 }
                             }
-                            // Emit face if neighbor is air OR neighbor is non-opaque (e.g., leaves)
-                            if (neighbor != BlockType.Air && (world == null || world.IsBlockOpaque(neighbor))) continue;
+                            // Enhanced face culling logic for different block types
+                            bool shouldRenderFace = ShouldRenderFace(t, neighbor, d, world);
+
+
+                            // Remove interior face rendering - use alpha-based depth instead
+                            // Water depth effect is now achieved through material transparency layering
+
+                            if (!shouldRenderFace) continue;
 
                             var f = FaceVerts[d];
                             int vi = verts.Count;
-                            verts.Add(basePos + f[0]);
-                            verts.Add(basePos + f[1]);
-                            verts.Add(basePos + f[2]);
-                            verts.Add(basePos + f[3]);
-                            // Normal is dir
-                            var n = (Vector3)dir;
-                            norms.Add(n); norms.Add(n); norms.Add(n); norms.Add(n);
-                            // Simple UVs
-                            uvs.Add(QuadUV[0]); uvs.Add(QuadUV[1]); uvs.Add(QuadUV[2]); uvs.Add(QuadUV[3]);
+
+                            // For water blocks, we need to pass world position to shader for seamless animation
+                            if (t == BlockType.Water)
+                            {
+                                // Calculate world position for each vertex
+                                int worldX = chunk.coord.x * chunk.sizeX + x;
+                                int worldZ = chunk.coord.y * chunk.sizeZ + z;
+
+                                // Add vertices with world-space information
+                                verts.Add(basePos + f[0]);
+                                verts.Add(basePos + f[1]);
+                                verts.Add(basePos + f[2]);
+                                verts.Add(basePos + f[3]);
+
+                                // Normal is dir
+                                var n = (Vector3)dir;
+                                norms.Add(n); norms.Add(n); norms.Add(n); norms.Add(n);
+
+                                // Pass world coordinates through UV2 channel for shader world-space calculations
+                                var worldPosUV0 = new Vector2(worldX + f[0].x, worldZ + f[0].z);
+                                var worldPosUV1 = new Vector2(worldX + f[1].x, worldZ + f[1].z);
+                                var worldPosUV2 = new Vector2(worldX + f[2].x, worldZ + f[2].z);
+                                var worldPosUV3 = new Vector2(worldX + f[3].x, worldZ + f[3].z);
+
+                                // Regular UVs for texture mapping
+                                uvs.Add(QuadUV[0]); uvs.Add(QuadUV[1]); uvs.Add(QuadUV[2]); uvs.Add(QuadUV[3]);
+                            }
+                            else
+                            {
+                                // Simple vertex placement for non-water blocks
+                                verts.Add(basePos + f[0]);
+                                verts.Add(basePos + f[1]);
+                                verts.Add(basePos + f[2]);
+                                verts.Add(basePos + f[3]);
+
+                                // Normal is dir
+                                var n = (Vector3)dir;
+                                norms.Add(n); norms.Add(n); norms.Add(n); norms.Add(n);
+
+                                // Simple UVs
+                                uvs.Add(QuadUV[0]); uvs.Add(QuadUV[1]); uvs.Add(QuadUV[2]); uvs.Add(QuadUV[3]);
+                            }
 
                             // --- Fake face lighting + subtle per-block variation ---
                             // Minecraft-like depth: darken certain faces & bottom, lighten top.
@@ -147,19 +368,19 @@ namespace WorldGeneration.Chunks
                                     shade = Mathf.Clamp01(shade * (1f + v));
                                 }
                             }
+
                             var c = new Color(shade, shade, shade, 1f);
                             colors.Add(c); colors.Add(c); colors.Add(c); colors.Add(c);
 
-                            // Choose single material per face (e.g., top/bottom or non-grass blocks)
+                            // Simple material selection
                             Material faceMat = null;
                             if (world != null)
                             {
-                                // face index mapping matches Directions order
                                 faceMat = world.GetFaceMaterial(t, d);
-                            }
-                            if (faceMat == null)
-                            {
-                                faceMat = world != null ? world.GetBlockMaterial(t) : null;
+                                if (faceMat == null)
+                                {
+                                    faceMat = world.GetBlockMaterial(t);
+                                }
                             }
                             if (faceMat == null) continue; // skip if no material configured
 
@@ -198,6 +419,21 @@ namespace WorldGeneration.Chunks
             mf.sharedMesh = mesh;
             mr.sharedMaterials = materials.ToArray();
 
+            // Check if this chunk contains water and disable shadows + fix culling issues
+            bool hasWater = materials.Any(m => m != null && m.name.Contains("Water"));
+            if (hasWater)
+            {
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                mr.receiveShadows = false;
+
+                // Fix potential culling issues with transparent water
+                // Expand bounds slightly to prevent aggressive frustum culling
+                var bounds = mesh.bounds;
+                bounds.Expand(2f); // Expand by 2 units in all directions
+                mesh.bounds = bounds;
+
+            }
+
             if (addCollider)
             {
                 var mc = parent.GetComponent<MeshCollider>();
@@ -206,5 +442,7 @@ namespace WorldGeneration.Chunks
                 mc.sharedMesh = mesh;
             }
         }
+
+
     }
 }

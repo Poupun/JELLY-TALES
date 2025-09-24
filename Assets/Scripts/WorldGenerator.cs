@@ -145,6 +145,18 @@ public class WorldGenerator : MonoBehaviour
         public float weight = 1f;
     }
 
+    [Header("Biomes & World")]
+    [Tooltip("Percentage of world that should be ocean biomes (0.0 - 1.0)")]
+    [Range(0f, 1f)] public float oceanCoverage = 0.3f;
+    [Tooltip("Sea level height for ocean biomes (like Minecraft's Y=62)")]
+    public int seaLevel = 62;
+    [Tooltip("Maximum depth of ocean floors below sea level")]
+    public int maxOceanDepth = 40;
+
+    [Header("Ocean Water Appearance")]
+    [Tooltip("Water transparency (0 = invisible, 1 = normal, 5 = very opaque)")]
+    [Range(0f, 5f)] public float waterTransparency = 0.7f;
+
     [Header("Trees")] 
     [Tooltip("Enable procedural tree generation (advanced)." )]
     public bool enableTrees = true;
@@ -253,7 +265,7 @@ public class WorldGenerator : MonoBehaviour
         }
     }
 
-    [Header("Plant Wind Animation")] 
+    [Header("Plant Wind Animation")]
     [Tooltip("Enable wind sway for grass/plant billboards.")]
     public bool enablePlantWind = true;
     [Range(0f,0.25f)] public float plantWindAmplitude = 0.07f;
@@ -262,6 +274,28 @@ public class WorldGenerator : MonoBehaviour
     [Range(0f,1f)] public float plantWindVerticalFactor = 0.2f;
     [Tooltip("Per-plant randomization factor (0 = uniform motion).")]
     [Range(0f,1f)] public float plantWindVariation = 0.5f;
+
+    [Header("Water Surface Animation")]
+    [Tooltip("Enable gentle wave motion for water surface blocks using world-space shader calculations.")]
+    public bool enableWaterWaves = true;
+
+    [Header("Water Wave Properties")]
+    [Tooltip("Wave height intensity (higher = more vertical movement)")]
+    [Range(0f, 2f)] public float waterWaveAmplitude = 0.08f;
+    [Tooltip("Wave animation speed (higher = faster waves)")]
+    [Range(0.1f, 20f)] public float waterWaveSpeed = 1.5f;
+    [Tooltip("Wave spatial frequency (higher = more frequent waves)")]
+    [Range(0.1f, 10f)] public float waterWaveScale = 0.8f;
+    [Tooltip("Primary water flow direction on XZ plane")]
+    public Vector2 waterWaveDirection = new Vector2(1f, 0.3f);
+
+    [Header("Water Appearance")]
+    [Tooltip("Water color tint")]
+    public Color waterColor = new Color(0.2f, 0.6f, 1f, 0.7f);
+
+    // Global water animation synchronization
+    private float globalWaterTime = 0f;
+    private static float _globalWavePhase = 0f;
 
     [Header("Plant Controls")]
     [Tooltip("Weight multipliers for plant selection by texture name.")]
@@ -274,6 +308,14 @@ public class WorldGenerator : MonoBehaviour
     [Range(0.5f,2f)] public float plantSizeGrass = 1.0f;
     private float _lastPlantWeightFern = -1f, _lastPlantWeightPlant = -1f, _lastPlantWeightGrass = -1f;
     private float _lastPlantSizeFern = -1f, _lastPlantSizePlant = -1f, _lastPlantSizeGrass = -1f;
+
+    // Water animation parameter tracking for world-space shader sync
+    private float _lastWaterWaveAmplitude = -1f;
+    private float _lastWaterWaveSpeed = -1f;
+    private float _lastWaterWaveScale = -1f;
+    private Vector2 _lastWaterWaveDirection = Vector2.zero;
+    private Color _lastWaterColor = Color.clear;
+    private float _lastWaterTransparency = -1f;
 
     [Header("Debug / Reload")] 
     [Tooltip("If true, a reload will discard persisted chunk edits (fresh world)." )]
@@ -305,6 +347,8 @@ public class WorldGenerator : MonoBehaviour
     // One-time logs to avoid spamming when falling back from custom shaders
     private bool _loggedPlantWindFallback = false;
     private bool _loggedLeavesWindFallback = false;
+    private bool _lastEnableWaterWaves = false;
+    private bool _loggedWaterWaveFallback = false;
 
     // Save DTOs (local to avoid cross-file dependency)
     [System.Serializable]
@@ -315,9 +359,20 @@ public class WorldGenerator : MonoBehaviour
     
     void Start()
     {
+        // Ensure WaterAnimator exists for water texture animation
+        var waterAnimator = FindFirstObjectByType<WaterAnimator>();
+        if (waterAnimator == null)
+        {
+            waterAnimator = gameObject.AddComponent<WaterAnimator>();
+            Debug.Log("WaterAnimator component added to WorldGenerator GameObject");
+        }
+
+        // Water animation is now handled by world-space shaders - no additional components needed
+        Debug.Log("Water animation using world-space shader approach for seamless chunk boundaries");
+
     // Try to find TextureVariationManager if already configured in the scene (optional)
     textureManager = GetComponent<TextureVariationManager>();
-        
+
         LoadTextures();
         CreateBlockMaterials();
 
@@ -462,6 +517,107 @@ public class WorldGenerator : MonoBehaviour
                 }
             }
         }
+
+        // Update water wave animation parameters each frame (like leaf wind)
+        if (enableWaterWaves && blockMaterials != null && (int)BlockType.Water < blockMaterials.Length)
+        {
+            var waterMaterial = blockMaterials[(int)BlockType.Water];
+            if (waterMaterial != null)
+            {
+                // Check if using any wind shader for water animation
+                bool hasWindShader = waterMaterial.shader != null &&
+                                    (waterMaterial.shader.name.Contains("Wind") ||
+                                     waterMaterial.shader.name.Contains("Wave"));
+
+                if (hasWindShader)
+                {
+                    // Map water wave parameters to wind shader properties for similar behavior
+                    if (waterMaterial.HasProperty("_WindAmp"))
+                        waterMaterial.SetFloat("_WindAmp", waterWaveAmplitude);
+                    if (waterMaterial.HasProperty("_WindSpeed"))
+                        waterMaterial.SetFloat("_WindSpeed", waterWaveSpeed);
+                    if (waterMaterial.HasProperty("_WindScale"))
+                        waterMaterial.SetFloat("_WindScale", waterWaveScale);
+
+                    // Water-specific: More vertical motion than leaves, minimal variation for smooth surface
+                    if (waterMaterial.HasProperty("_WindVertical"))
+                        waterMaterial.SetFloat("_WindVertical", 0.9f); // Higher than leaves (0.3f)
+                    if (waterMaterial.HasProperty("_WindVar"))
+                        waterMaterial.SetFloat("_WindVar", 0.1f); // Very low variation for uniform waves
+
+                    // Apply wave direction for water flow effect
+                    if (waterMaterial.HasProperty("_WindDir"))
+                    {
+                        Vector2 dir = waterWaveDirection.sqrMagnitude < 0.0001f ?
+                                    new Vector2(1, 0) : waterWaveDirection.normalized;
+                        waterMaterial.SetVector("_WindDir", new Vector4(dir.x, dir.y, 0, 0));
+                    }
+
+                    // CRITICAL: Force world-space animation for seamless chunk transitions
+                    if (waterMaterial.HasProperty("_UseWorldPos"))
+                        waterMaterial.SetFloat("_UseWorldPos", 1.0f);
+
+                    // Apply water color and transparency
+                    Color finalColor = new Color(waterColor.r, waterColor.g, waterColor.b, waterTransparency);
+                    if (waterMaterial.HasProperty("_Color"))
+                        waterMaterial.SetColor("_Color", finalColor);
+                    if (waterMaterial.HasProperty("_BaseColor"))
+                        waterMaterial.SetColor("_BaseColor", finalColor);
+
+                    // Ensure material color property is set for basic transparency
+                    waterMaterial.color = finalColor;
+
+                    // Set chunk offset to zero - calculate everything in world space
+                    if (waterMaterial.HasProperty("_ChunkOffset"))
+                        waterMaterial.SetVector("_ChunkOffset", Vector4.zero);
+
+                    // Override any local positioning with global world coordinates
+                    if (waterMaterial.HasProperty("_WorldOrigin"))
+                        waterMaterial.SetVector("_WorldOrigin", Vector4.zero);
+                }
+            }
+        }
+
+        // Live water wave shader swap (like leaf wind system)
+        if (blockMaterials != null && (enableWaterWaves != _lastEnableWaterWaves))
+        {
+            _lastEnableWaterWaves = enableWaterWaves;
+            if ((int)BlockType.Water < blockMaterials.Length)
+            {
+                var waterMaterial = blockMaterials[(int)BlockType.Water];
+                if (waterMaterial != null)
+                {
+                    if (enableWaterWaves)
+                    {
+                        // Try to switch to water wave shader
+                        var waveShader = Shader.Find("Custom/WaterWaves");
+                        if (waveShader == null) waveShader = Shader.Find("Custom/LeavesWind");
+
+                        if (waveShader != null && waveShader.isSupported)
+                        {
+                            waterMaterial.shader = waveShader;
+                            Debug.Log("Switched water to wave animation shader");
+                        }
+                        else if (!_loggedWaterWaveFallback)
+                        {
+                            _loggedWaterWaveFallback = true;
+                            Debug.LogWarning("No water wave shader found - keeping standard URP shader");
+                        }
+                    }
+                    else
+                    {
+                        // Switch back to standard URP shader
+                        var standardShader = Shader.Find("Universal Render Pipeline/Lit");
+                        if (standardShader != null)
+                        {
+                            waterMaterial.shader = standardShader;
+                            Debug.Log("Switched water back to standard URP shader");
+                        }
+                    }
+                }
+            }
+        }
+
         // Debug trigger reload
         if (Application.isPlaying && triggerReloadInPlay)
         {
@@ -541,6 +697,35 @@ public class WorldGenerator : MonoBehaviour
                 _lastPlantSizePlant = plantSizePlant;
                 _lastPlantSizeGrass = plantSizeGrass;
                 RebuildPlantsForAllLoadedChunks();
+            }
+
+            // Live water animation parameter update for world-space shaders
+            if (enableWaterWaves && (
+                Mathf.Abs(waterWaveAmplitude - _lastWaterWaveAmplitude) > 0.0001f ||
+                Mathf.Abs(waterWaveSpeed - _lastWaterWaveSpeed) > 0.0001f ||
+                Mathf.Abs(waterWaveScale - _lastWaterWaveScale) > 0.0001f ||
+                Mathf.Abs(waterTransparency - _lastWaterTransparency) > 0.0001f ||
+                Vector2.Distance(waterWaveDirection, _lastWaterWaveDirection) > 0.0001f ||
+                (waterColor != _lastWaterColor)))
+            {
+                _lastWaterWaveAmplitude = waterWaveAmplitude;
+                _lastWaterWaveSpeed = waterWaveSpeed;
+                _lastWaterWaveScale = waterWaveScale;
+                _lastWaterWaveDirection = waterWaveDirection;
+                _lastWaterColor = waterColor;
+                _lastWaterTransparency = waterTransparency;
+                // Parameters are automatically applied during the main water animation loop
+            }
+
+            // Global water wave synchronization - ensure all chunks animate together using world-space shaders
+            if (enableWaterWaves)
+            {
+                // Update global wave time that all water materials will use
+                globalWaterTime += Time.deltaTime * waterWaveSpeed;
+                _globalWavePhase = globalWaterTime;
+
+                // Force sync all water materials every frame to prevent drift
+                SyncAllWaterMaterials();
             }
             // Start background chunk loads (removed frame time restriction for faster loading)
             int budget = Mathf.Max(1, maxChunkLoadsPerFrame);
@@ -1121,20 +1306,41 @@ public class WorldGenerator : MonoBehaviour
 
         // Bedrock layer (unbreakable foundation)
         if (worldPos.y <= 2) return BlockType.Bedrock;
-        
-        // Check for NEW tunnel system FIRST at all Y levels
+
+        // Get biome data to determine surface/underground boundary
+        BiomeData biome = GetBiomeDataAt(worldPos);
+
+        // Check for NEW tunnel system FIRST at all Y levels - but avoid water areas in ocean biomes
         if (enableTunnels && WorldGeneration.HorizontalTunnelGenerator.IsTunnelBlock(worldPos, worldSeed, tunnelSettings))
         {
-            return BlockType.Air; // Tunnel air space
+            // Don't generate tunnels in water areas OR sandy ocean floor of ocean biomes
+            int oceanFloor = GetColumnTopY(worldPos.x, worldPos.z);
+            if (biome.type == BiomeType.Ocean && worldPos.y >= oceanFloor - 2 && worldPos.y <= biome.waterLevel)
+            {
+                // This would be ocean floor sand or water block, so don't replace with tunnel air
+                // Fall through to normal generation
+            }
+            else
+            {
+                return BlockType.Air; // Tunnel air space
+            }
         }
-        
-        // Deep underground layers (Y 3-99) - Only generate solid blocks if no cave
-        if (worldPos.y <= 99)
+
+        int surfaceThreshold = biome.type == BiomeType.Ocean ? biome.waterLevel : 99;
+
+
+        // Deep underground layers - Only generate solid blocks if no cave
+        if (worldPos.y <= surfaceThreshold)
         {
+            // For ocean biomes, use surface generation for all positions near water level
+            if (biome.type == BiomeType.Ocean && worldPos.y > 20) // Ocean surface generation starts at Y=20
+            {
+                return GenerateSurfaceBlock(worldPos);
+            }
             return GenerateUndergroundBlock(worldPos);
         }
-        
-        // Surface terrain (Y 100+) - Only generate if no cave
+
+        // Surface terrain - Only generate if no cave
         return GenerateSurfaceBlock(worldPos);
     }
     
@@ -1250,81 +1456,115 @@ public class WorldGenerator : MonoBehaviour
     
     private BlockType GenerateSurfaceBlock(Vector3Int worldPos)
     {
+
+        // Get biome data for this position
+        BiomeData biome = GetBiomeDataAt(worldPos);
+
         // Debug warning if using default seed (indicates timing issue)
         if (worldSeed == 12345 && !string.IsNullOrEmpty(currentWorldName))
         {
             Debug.LogWarning($"WorldGenerator: Using default seed {worldSeed} for world '{currentWorldName}' - possible timing issue!");
         }
-        
-        // Plains biome: mostly flat with occasional small hills
-        // Use smaller seed offset to avoid large coordinate values that break Perlin noise
-        float seedOffset = (worldSeed % 10000) * 0.01f;
-        
-        // Base flat terrain with higher default variation
-        float baseX = worldPos.x * 0.008f + seedOffset; // Slightly faster variation for more rolling terrain
-        float baseZ = worldPos.z * 0.008f + seedOffset;
-        float baseNoise = Mathf.PerlinNoise(baseX, baseZ);
-        
-        // Hill detection - smaller but more common hills
-        float hillX = worldPos.x * 0.015f + seedOffset * 1.7f; // Higher frequency for more common hills
-        float hillZ = worldPos.z * 0.015f + seedOffset * 1.7f;
-        float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
-        
-        // Very common hills (lower threshold for more frequent hills)
-        float hillMultiplier = hillNoise > 0.3f ? Mathf.Pow((hillNoise - 0.3f) / 0.7f, 1.2f) : 0f;
-        
-        // Small detail noise for micro-variations
-        float detailX = worldPos.x * 0.05f + seedOffset;
-        float detailZ = worldPos.z * 0.05f + seedOffset;
-        float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
-        
-        // Combine: higher base variation + smaller common hills + details
-        // Moved surface to Y=100-120 to allow for 100 underground levels (Y=0-99)
-        float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
-        int surfaceHeight = Mathf.RoundToInt(combinedHeight); // Base Y=105-115, hills up to Y=119
-        
-        // Debug logging disabled to improve performance
-        // if (worldPos.x >= -2 && worldPos.x <= 2 && worldPos.z >= -2 && worldPos.z <= 2 && worldPos.y == surfaceHeight)
-        // {
-        //     Debug.Log($"Plains Terrain - Pos: {worldPos}, baseNoise: {baseNoise:F3}, hillNoise: {hillNoise:F3}, hillMult: {hillMultiplier:F3}, detailNoise: {detailNoise:F3}, height: {surfaceHeight}, seed: {worldSeed}");
-        // }
-        
-        if (worldPos.y < surfaceHeight - 4) return BlockType.Stone;
-        if (worldPos.y < surfaceHeight) return BlockType.Dirt;
-        if (worldPos.y == surfaceHeight) return BlockType.Grass;
-        
+
+        // Get the surface height for this column
+        int surfaceHeight = GetColumnTopY(worldPos.x, worldPos.z);
+
+        // Handle ocean biome water generation
+        if (biome.type == BiomeType.Ocean)
+        {
+
+            // Above sea level = air
+            if (worldPos.y > biome.waterLevel)
+            {
+                return BlockType.Air;
+            }
+
+            // At or below sea level but above ocean floor = water
+            if (worldPos.y > surfaceHeight && worldPos.y <= biome.waterLevel)
+            {
+                return BlockType.Water;
+            }
+
+            // Ocean floor and below = terrain blocks
+            if (worldPos.y < surfaceHeight - 3) return biome.deepBlock;        // Deep stone
+            if (worldPos.y < surfaceHeight) return biome.subSurfaceBlock;      // Sand subsurface
+            if (worldPos.y == surfaceHeight) return biome.surfaceBlock;       // Sand ocean floor
+
+            // This should not happen in ocean biomes - return surface block as fallback
+            return biome.surfaceBlock;
+        }
+
+        // Handle regular biomes (Plains, etc.)
+        if (worldPos.y < surfaceHeight - 4) return biome.deepBlock;           // Deep stone
+        if (worldPos.y < surfaceHeight) return biome.subSurfaceBlock;         // Dirt
+        if (worldPos.y == surfaceHeight) return biome.surfaceBlock;           // Grass
+
         return BlockType.Air;
     }
 
     // Public helper (used in chunk streaming to compute useful Y per chunk)
     public int GetColumnTopY(int worldX, int worldZ)
     {
-        // Use the same surface generation logic as GenerateSurfaceBlock
-        // Plains biome: mostly flat with occasional small hills
+        // Get biome data for this position
+        Vector3 worldPos = new Vector3(worldX, 0, worldZ);
+        BiomeData biome = GetBiomeDataAt(worldPos);
+
         float seedOffset = (worldSeed % 10000) * 0.01f;
-        
-        // Base flat terrain with higher default variation
-        float baseX = worldX * 0.008f + seedOffset; // Slightly faster variation for more rolling terrain
-        float baseZ = worldZ * 0.008f + seedOffset;
+
+        // Use biome-specific terrain parameters
+        float baseX = worldX * biome.terrainScale + seedOffset;
+        float baseZ = worldZ * biome.terrainScale + seedOffset;
         float baseNoise = Mathf.PerlinNoise(baseX, baseZ);
-        
-        // Hill detection - smaller but more common hills
-        float hillX = worldX * 0.015f + seedOffset * 1.7f; // Higher frequency for more common hills
-        float hillZ = worldZ * 0.015f + seedOffset * 1.7f;
+
+        // Hill detection using biome parameters
+        float hillX = worldX * (biome.terrainScale * 2f) + seedOffset * 1.7f;
+        float hillZ = worldZ * (biome.terrainScale * 2f) + seedOffset * 1.7f;
         float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
-        
-        // Very common hills (lower threshold for more frequent hills)
-        float hillMultiplier = hillNoise > 0.3f ? Mathf.Pow((hillNoise - 0.3f) / 0.7f, 1.2f) : 0f;
-        
+
+        // Use biome-specific hill threshold and multiplier
+        float hillMultiplier = hillNoise > biome.hillThreshold ?
+            Mathf.Pow((hillNoise - biome.hillThreshold) / (1f - biome.hillThreshold), 1.2f) * biome.hillMultiplier : 0f;
+
         // Small detail noise for micro-variations
         float detailX = worldX * 0.05f + seedOffset;
         float detailZ = worldZ * 0.05f + seedOffset;
         float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
-        
-        // Combine: higher base variation + smaller common hills + details
-        // Moved surface to Y=100-120 to allow for 100 underground levels (Y=0-99)
-        float combinedHeight = 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+
+        // Add wave-like ondulation for ocean biomes (sand dunes/ripples)
+        float waveNoise = 0f;
+        if (biome.type == BiomeType.Ocean)
+        {
+            // Create wave-like patterns for sandy ocean floor
+            float waveX1 = worldX * 0.08f + seedOffset * 2.3f;
+            float waveZ1 = worldZ * 0.08f + seedOffset * 2.3f;
+            float wave1 = Mathf.Sin(waveX1 * 2f) * Mathf.Sin(waveZ1 * 2f) * 0.8f;
+
+            // Secondary wave pattern for more complexity
+            float waveX2 = worldX * 0.12f + seedOffset * 1.7f;
+            float waveZ2 = worldZ * 0.12f + seedOffset * 1.7f;
+            float wave2 = Mathf.Sin(waveX2 * 3f + waveZ2) * 0.5f;
+
+            // Ripple effect for fine sand details
+            float rippleX = worldX * 0.25f + seedOffset;
+            float rippleZ = worldZ * 0.25f + seedOffset;
+            float ripple = Mathf.Sin(rippleX * 5f) * Mathf.Sin(rippleZ * 5f) * 0.3f;
+
+            waveNoise = wave1 + wave2 + ripple;
+        }
+
+        // Combine using biome-specific base elevation and amplitude
+        float combinedHeight = biome.baseElevation + baseNoise * biome.terrainAmplitude +
+                               hillMultiplier * (biome.terrainAmplitude * 0.5f) + detailNoise + waveNoise;
         int surfaceHeight = Mathf.RoundToInt(combinedHeight);
+
+        // For ocean biomes, ensure terrain can go below sea level
+        if (biome.type == BiomeType.Ocean)
+        {
+            // Allow ocean floor to be much lower than sea level
+            int minOceanFloor = biome.waterLevel - biome.maxDepth;
+            surfaceHeight = Mathf.Max(minOceanFloor, surfaceHeight);
+        }
+
         return Mathf.Min(worldHeight - 1, surfaceHeight);
     }
 
@@ -1341,12 +1581,42 @@ public class WorldGenerator : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Get current synchronized water animation time for wave calculations
+    /// </summary>
+    public float GetWaterAnimationTime()
+    {
+        return _globalWavePhase;
+    }
+
+    /// <summary>
+    /// Get global wave phase for synchronized water animation across all chunks
+    /// </summary>
+    public static float GetGlobalWavePhase()
+    {
+        return _globalWavePhase;
+    }
+
     // --- Public accessors (for debug/overlay tools) ---
     public Vector2Int GetChunkCoord(Vector3 position) => WorldToChunkCoord(position);
     public Vector3 GetChunkOrigin(Vector2Int coord) => new Vector3(coord.x * Mathf.Max(1, chunkSizeX), 0f, coord.y * Mathf.Max(1, chunkSizeZ));
     public int GetChunkSizeX() => Mathf.Max(1, chunkSizeX);
     public int GetChunkSizeZ() => Mathf.Max(1, chunkSizeZ);
     public int GetWorldHeight() => Mathf.Max(1, worldHeight);
+
+    /// <summary>
+    /// Check if a chunk is currently loaded
+    /// </summary>
+    public bool HasChunkLoaded(Vector2Int coord) => _chunks.ContainsKey(coord);
+
+    /// <summary>
+    /// Get a loaded chunk by coordinates, returns null if not loaded
+    /// </summary>
+    public WorldGeneration.Chunks.Chunk GetLoadedChunk(Vector2Int coord)
+    {
+        _chunks.TryGetValue(coord, out var chunk);
+        return chunk;
+    }
     public List<Vector2Int> SnapshotLoadedChunkCoords()
     {
         // Return a snapshot copy to avoid collection modified exceptions during iteration
@@ -1354,8 +1624,237 @@ public class WorldGenerator : MonoBehaviour
     }
     public string GetBiomeAt(Vector3 worldPos)
     {
-        // Simple plains biome - can be expanded for multiple biomes in the future
-        return "Plains";
+        return GetBiomeTypeAt(worldPos).ToString();
+    }
+
+    public BiomeType GetBiomeTypeAt(Vector3 worldPos)
+    {
+        // Use biome noise to determine biome type
+        float biomeX = worldPos.x * 0.002f + (worldSeed * 0.01f);
+        float biomeZ = worldPos.z * 0.002f + (worldSeed * 0.01f);
+        float biomeNoise = Mathf.PerlinNoise(biomeX, biomeZ);
+
+        // Use configurable ocean coverage
+        if (biomeNoise < oceanCoverage)
+        {
+            return BiomeType.Ocean;
+        }
+
+        // Plains for the rest (can add more biomes later)
+        return BiomeType.Plains;
+    }
+
+    public BiomeData GetBiomeDataAt(Vector3 worldPos)
+    {
+        BiomeData biome = BiomeRegistry.GetBiome(GetBiomeTypeAt(worldPos));
+
+        // Apply WorldGenerator configuration to biome data
+        if (biome.type == BiomeType.Ocean)
+        {
+            biome.waterLevel = seaLevel;
+            biome.maxDepth = maxOceanDepth;
+        }
+
+        return biome;
+    }
+
+    /// <summary>
+    /// Updates the water material color based on ocean water settings
+    /// </summary>
+    [ContextMenu("Update Water Appearance")]
+    public void UpdateWaterAppearance()
+    {
+        Debug.Log("UpdateWaterAppearance() called - clearing material cache to regenerate water");
+
+        // Force refresh of existing chunks that contain water (only during play mode)
+        if (Application.isPlaying)
+        {
+            RefreshWaterChunks();
+        }
+    }
+
+    private void RefreshWaterChunks()
+    {
+        // Only refresh if BlockManager is properly initialized
+        if (BlockManager.Instance == null)
+        {
+            Debug.LogWarning("RefreshWaterChunks: BlockManager not initialized, skipping refresh");
+            return;
+        }
+
+        // Clear BlockManager material cache to force fresh material loading
+        BlockManager.ClearMaterialCache();
+
+        // Force regenerate blockMaterials array to pick up fresh materials
+        CreateBlockMaterials();
+
+        // Rebuild mesh for all loaded chunks to apply new water material
+        foreach (var kvp in _chunks)
+        {
+            var chunk = kvp.Value;
+            if (chunk != null && chunk.parent != null && ContainsWater(chunk))
+            {
+                // Rebuild the chunk mesh with updated materials
+                WorldGeneration.Chunks.ChunkMeshBuilder.BuildMesh(this, chunk, addChunkCollider);
+            }
+        }
+        Debug.Log("Refreshed water chunks with new material");
+    }
+
+    /// <summary>
+    /// Synchronize all water materials across all chunks to use the same global wave time.
+    /// This prevents chunk separation by ensuring consistent animation phase.
+    /// </summary>
+    private void SyncAllWaterMaterials()
+    {
+        // Get the master water material that all chunks should use
+        Material masterWaterMaterial = null;
+        if (blockMaterials != null && (int)BlockType.Water < blockMaterials.Length)
+        {
+            masterWaterMaterial = blockMaterials[(int)BlockType.Water];
+        }
+
+        if (masterWaterMaterial == null) return;
+
+        // First, sync the master material
+        SyncWaterMaterialToGlobalTime(masterWaterMaterial);
+
+        // Then ensure ALL chunks use this exact same material instance
+        foreach (var chunkKV in _chunks)
+        {
+            var chunk = chunkKV.Value;
+            if (chunk?.parent != null && ContainsWater(chunk))
+            {
+                var renderer = chunk.parent.GetComponent<MeshRenderer>();
+                if (renderer != null && renderer.sharedMaterials != null)
+                {
+                    // Replace any water materials with the master material
+                    Material[] materials = renderer.sharedMaterials;
+                    bool needsUpdate = false;
+
+                    for (int i = 0; i < materials.Length; i++)
+                    {
+                        if (materials[i] != null && IsWaterMaterial(materials[i]))
+                        {
+                            // Force all chunks to use the same water material instance
+                            if (materials[i] != masterWaterMaterial)
+                            {
+                                materials[i] = masterWaterMaterial;
+                                needsUpdate = true;
+                            }
+                        }
+                    }
+
+                    if (needsUpdate)
+                    {
+                        renderer.sharedMaterials = materials;
+                        Debug.Log($"Unified water material for chunk at {chunk.coord}");
+                    }
+                }
+            }
+        }
+    }
+
+    private bool IsWaterMaterial(Material material)
+    {
+        return material.name.Contains("Water") ||
+               (material.shader != null &&
+                (material.shader.name.Contains("Wind") || material.shader.name.Contains("Wave")));
+    }
+
+    private void SyncWaterMaterialToGlobalTime(Material material)
+    {
+        if (material == null) return;
+
+        // FORCE WORLD-SPACE CALCULATIONS: This is the key to eliminating chunk boundaries
+        // Most wind/wave shaders support world-space animation - we need to enable it
+
+        // 1. Enable world-space positioning (prevents local chunk coordinates from affecting animation)
+        if (material.HasProperty("_UseWorldPos"))
+            material.SetFloat("_UseWorldPos", 1.0f);
+        if (material.HasProperty("_WorldSpaceUV"))
+            material.SetFloat("_WorldSpaceUV", 1.0f);
+        if (material.HasProperty("_WorldSpace"))
+            material.SetFloat("_WorldSpace", 1.0f);
+
+        // 2. Disable any local/chunk-based offsets
+        if (material.HasProperty("_ChunkOffset"))
+            material.SetVector("_ChunkOffset", Vector4.zero);
+        if (material.HasProperty("_LocalOffset"))
+            material.SetVector("_LocalOffset", Vector4.zero);
+        if (material.HasProperty("_PositionOffset"))
+            material.SetVector("_PositionOffset", Vector4.zero);
+
+        // 3. Set IDENTICAL animation parameters for all chunks
+        if (material.HasProperty("_WindAmp"))
+            material.SetFloat("_WindAmp", waterWaveAmplitude);
+        if (material.HasProperty("_WindSpeed"))
+            material.SetFloat("_WindSpeed", waterWaveSpeed);
+        if (material.HasProperty("_WindScale"))
+            material.SetFloat("_WindScale", waterWaveScale);
+
+        // 4. Force consistent direction across all chunks
+        if (material.HasProperty("_WindDir"))
+        {
+            Vector2 dir = waterWaveDirection.sqrMagnitude < 0.0001f ?
+                        new Vector2(1, 0) : waterWaveDirection.normalized;
+            material.SetVector("_WindDir", new Vector4(dir.x, dir.y, 0, 0));
+        }
+
+        // 5. Minimize random variation that could cause chunk differences
+        if (material.HasProperty("_WindVar"))
+            material.SetFloat("_WindVar", 0.0f); // ZERO variation for perfect uniformity
+        if (material.HasProperty("_WindVertical"))
+            material.SetFloat("_WindVertical", 0.9f);
+
+        // 6. Override shader's time calculation with global synchronized time
+        if (material.HasProperty("_Time"))
+            material.SetFloat("_Time", _globalWavePhase);
+        if (material.HasProperty("_GlobalTime"))
+            material.SetFloat("_GlobalTime", _globalWavePhase);
+        if (material.HasProperty("_CustomTime"))
+            material.SetFloat("_CustomTime", _globalWavePhase);
+
+        // 7. Force world origin to be consistent
+        if (material.HasProperty("_WorldOrigin"))
+            material.SetVector("_WorldOrigin", Vector4.zero);
+    }
+
+    private bool ContainsWater(WorldGeneration.Chunks.Chunk chunk)
+    {
+        // Quick check if chunk contains any water blocks
+        for (int x = 0; x < chunk.sizeX; x++)
+        {
+            for (int y = 0; y < chunk.sizeY; y++)
+            {
+                for (int z = 0; z < chunk.sizeZ; z++)
+                {
+                    if (chunk.GetLocal(x, y, z) == BlockType.Water)
+                        return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Editor method to update water appearance when values change in inspector
+    void OnValidate()
+    {
+        // Only update water appearance if BlockManager is properly initialized
+        if (Application.isPlaying && BlockManager.Instance != null)
+        {
+            UpdateWaterAppearance();
+            SyncWaterAnimationParameters();
+        }
+    }
+
+    /// <summary>
+    /// Synchronize water animation parameters between WorldGenerator and UnifiedWaterSurface
+    /// </summary>
+    private void SyncWaterAnimationParameters()
+    {
+        // This method is no longer needed with the world-space shader approach
+        // Parameters are synchronized automatically through the material sync system
     }
 
     private void AutoFindPlayer()
@@ -1448,7 +1947,14 @@ public class WorldGenerator : MonoBehaviour
             {
                 // Column-specific top to avoid iterating unnecessary upper air cells
                 int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
-                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+
+                // IMPORTANT: For ocean biomes, extend generation to water level to include water blocks
+                Vector3 checkPos = new Vector3(coord.x * chunkSizeX + lx, 0, coord.y * chunkSizeZ + lz);
+                BiomeData biome = GetBiomeDataAt(checkPos);
+                int maxGenerationY = biome.type == BiomeType.Ocean ?
+                    Mathf.Max(columnTop, biome.waterLevel + 5) : columnTop;
+
+                int columnMaxY = Mathf.Min(worldHeight - 1, maxGenerationY);
                 for (int ly = 0; ly <= columnMaxY; ly++)
                 {
                     var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
@@ -1672,7 +2178,14 @@ public class WorldGenerator : MonoBehaviour
             for (int lz = 0; lz < chunkSizeZ; lz++)
             {
                 int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
-                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+
+                // IMPORTANT: For ocean biomes, extend generation to water level to include water blocks
+                Vector3 checkPos = new Vector3(coord.x * chunkSizeX + lx, 0, coord.y * chunkSizeZ + lz);
+                BiomeData biome = GetBiomeDataAt(checkPos);
+                int maxGenerationY = biome.type == BiomeType.Ocean ?
+                    Mathf.Max(columnTop, biome.waterLevel + 5) : columnTop;
+
+                int columnMaxY = Mathf.Min(worldHeight - 1, maxGenerationY);
                 for (int ly = 0; ly <= columnMaxY; ly++)
                 {
                     var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
@@ -1694,7 +2207,14 @@ public class WorldGenerator : MonoBehaviour
             for (int lz = 0; lz < chunkSizeZ; lz++)
             {
                 int columnTop = GetColumnTopY(coord.x * chunkSizeX + lx, coord.y * chunkSizeZ + lz);
-                int columnMaxY = Mathf.Min(worldHeight - 1, columnTop);
+
+                // IMPORTANT: For ocean biomes, extend generation to water level to include water blocks
+                Vector3 checkPos = new Vector3(coord.x * chunkSizeX + lx, 0, coord.y * chunkSizeZ + lz);
+                BiomeData biome = GetBiomeDataAt(checkPos);
+                int maxGenerationY = biome.type == BiomeType.Ocean ?
+                    Mathf.Max(columnTop, biome.waterLevel + 5) : columnTop;
+
+                int columnMaxY = Mathf.Min(worldHeight - 1, maxGenerationY);
                 for (int ly = 0; ly <= columnMaxY; ly++)
                 {
                     var wp = new Vector3Int(coord.x * chunkSizeX + lx, ly, coord.y * chunkSizeZ + lz);
@@ -1724,6 +2244,22 @@ public class WorldGenerator : MonoBehaviour
     {
         // Standard BuildMesh call
         WorldGeneration.Chunks.ChunkMeshBuilder.BuildMesh(this, chunk, addChunkCollider);
+
+        // Immediately sync water materials for this chunk if it contains water
+        if (enableWaterWaves && ContainsWater(chunk))
+        {
+            var renderer = chunk.parent?.GetComponent<MeshRenderer>();
+            if (renderer != null && renderer.sharedMaterials != null)
+            {
+                foreach (var material in renderer.sharedMaterials)
+                {
+                    if (material != null && IsWaterMaterial(material))
+                    {
+                        SyncWaterMaterialToGlobalTime(material);
+                    }
+                }
+            }
+        }
     }
 
     private IEnumerator BuildVisible(WorldGeneration.Chunks.Chunk chunk)
@@ -2461,6 +2997,16 @@ public class WorldGenerator : MonoBehaviour
     private IEnumerator GenerateTreesInChunkRoutine(WorldGeneration.Chunks.Chunk chunk)
     {
         if (!enableTrees) yield break;
+
+        // Check biome - skip tree generation in biomes where trees shouldn't spawn
+        Vector3 chunkCenter = new Vector3(
+            chunk.coord.x * chunk.sizeX + chunk.sizeX * 0.5f,
+            0,
+            chunk.coord.y * chunk.sizeZ + chunk.sizeZ * 0.5f
+        );
+        BiomeData biome = GetBiomeDataAt(chunkCenter);
+
+        if (!biome.enableTrees) yield break;
 
         // Deterministic world-space sampling across chunk borders.
         int grid = Mathf.Max(2, treeGridSize);

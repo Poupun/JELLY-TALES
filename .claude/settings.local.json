@@ -18,7 +18,11 @@
       "WebSearch",
       "Bash(/Applications/Unity/Hub/Editor/6000.0.33f1/Unity.app/Contents/MacOS/Unity:*)",
       "Bash(rg:*)",
-      "WebFetch(domain:minecraft.wiki)"
+      "WebFetch(domain:minecraft.wiki)",
+      "WebFetch(domain:gamedev.stackexchange.com)",
+      "WebFetch(domain:0fps.net)",
+      "WebFetch(domain:stackoverflow.com)",
+      "WebFetch(domain:discussions.unity.com)"
     ],
     "deny": [
       "mcp__UnityMCP__manage_editor"
