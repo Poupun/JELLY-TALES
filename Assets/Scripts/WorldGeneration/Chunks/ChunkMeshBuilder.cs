@@ -41,7 +41,8 @@ namespace WorldGeneration.Chunks
         };
 
 
-        private static bool ShouldRenderFace(BlockType currentBlock, BlockType neighborBlock, int faceDirection, WorldGenerator world)
+        private static bool ShouldRenderFace(BlockType currentBlock, BlockType neighborBlock, int faceDirection, WorldGenerator world,
+            Vector3Int currentPos = default, Vector3Int neighborPos = default)
         {
             // Always render faces against air
             if (neighborBlock == BlockType.Air)
@@ -50,16 +51,25 @@ namespace WorldGeneration.Chunks
             // Special handling for water blocks - strategic interior face rendering
             if (currentBlock == BlockType.Water)
             {
+                // NEVER render bottom faces (-Y) - causes Z-fighting with blocks below
+                if (faceDirection == 3) // -Y is index 3
+                    return false;
+
                 // Don't render water faces against sand to prevent Z-fighting
                 if (neighborBlock == BlockType.Sand)
                     return false;
+
+                // ALWAYS render top faces (+Y direction) regardless of what's above
+                // This is crucial for sloped water surfaces to display correctly
+                if (faceDirection == 2) // +Y is index 2
+                    return true;
 
                 // Always render faces against other non-water blocks
                 if (neighborBlock != BlockType.Water)
                     return true;
 
-                // For water-to-water faces, selectively render to show depth layers
-                // This will be handled in the main mesh building loop
+                // Don't render water-to-water interior faces (reduces overdraw)
+                // The sloped top faces handle the visual flow representation
                 return false;
             }
 
@@ -236,6 +246,10 @@ namespace WorldGeneration.Chunks
             var uvs = new List<Vector2>();
             var colors = new List<Color>(); // vertex color for fake lighting / variation
 
+            // Separate collision mesh data (excludes water blocks)
+            var collisionVerts = new List<Vector3>();
+            var collisionTris = new List<int>();
+
             // Helper to get/create tri list for a material
             List<int> GetList(Material m)
             {
@@ -268,6 +282,18 @@ namespace WorldGeneration.Chunks
                             var dir = Directions[d];
                             int nx = x + dir.x, ny = y + dir.y, nz = z + dir.z;
                             BlockType neighbor = BlockType.Air;
+
+                            // Calculate world positions for current block and neighbor
+                            int currentWorldX = chunk.coord.x * chunk.sizeX + x;
+                            int currentWorldY = y;
+                            int currentWorldZ = chunk.coord.y * chunk.sizeZ + z;
+                            Vector3Int currentWorldPos = new Vector3Int(currentWorldX, currentWorldY, currentWorldZ);
+
+                            int neighborWorldX = chunk.coord.x * chunk.sizeX + x + dir.x;
+                            int neighborWorldY = y + dir.y;
+                            int neighborWorldZ = chunk.coord.y * chunk.sizeZ + z + dir.z;
+                            Vector3Int neighborWorldPos = new Vector3Int(neighborWorldX, neighborWorldY, neighborWorldZ);
+
                             bool inside = nx >= 0 && nx < chunk.sizeX && ny >= 0 && ny < chunk.sizeY && nz >= 0 && nz < chunk.sizeZ;
                             if (inside)
                             {
@@ -275,18 +301,14 @@ namespace WorldGeneration.Chunks
                             }
                             else if (world != null)
                             {
-                                // Fix coordinate calculation for chunk boundaries
-                                int worldX = chunk.coord.x * chunk.sizeX + x + dir.x;
-                                int worldY = y + dir.y;
-                                int worldZ = chunk.coord.y * chunk.sizeZ + z + dir.z;
-                                if (worldY >= 0 && worldY < world.worldHeight)
+                                if (neighborWorldY >= 0 && neighborWorldY < world.worldHeight)
                                 {
-                                    neighbor = world.GetBlockType(new Vector3Int(worldX, worldY, worldZ));
-
+                                    neighbor = world.GetBlockType(neighborWorldPos);
                                 }
                             }
+
                             // Enhanced face culling logic for different block types
-                            bool shouldRenderFace = ShouldRenderFace(t, neighbor, d, world);
+                            bool shouldRenderFace = ShouldRenderFace(t, neighbor, d, world, currentWorldPos, neighborWorldPos);
 
 
                             // Remove interior face rendering - use alpha-based depth instead
@@ -300,25 +322,212 @@ namespace WorldGeneration.Chunks
                             // For water blocks, we need to pass world position to shader for seamless animation
                             if (t == BlockType.Water)
                             {
-                                // Calculate world position for each vertex
-                                int worldX = chunk.coord.x * chunk.sizeX + x;
-                                int worldZ = chunk.coord.y * chunk.sizeZ + z;
+                                // Use already calculated world position
+                                int worldX = currentWorldX;
+                                int worldY = currentWorldY;
+                                int worldZ = currentWorldZ;
 
-                                // Add vertices with world-space information
-                                verts.Add(basePos + f[0]);
-                                verts.Add(basePos + f[1]);
-                                verts.Add(basePos + f[2]);
-                                verts.Add(basePos + f[3]);
+                                // Get water flow system for level-based heights
+                                var waterFlow = world.GetComponent<WaterFlowSystem>();
+
+                                // Helper function to get water height at a position
+                                System.Func<Vector3Int, float> GetWaterHeightAt = (Vector3Int pos) =>
+                                {
+                                    BlockType blockType = world.GetBlockType(pos);
+                                    if (blockType == BlockType.Water && waterFlow != null)
+                                    {
+                                        byte level = waterFlow.GetWaterLevel(pos);
+                                        return 1f - (level / 9f);
+                                    }
+                                    return blockType == BlockType.Air ? 0f : 1f;
+                                };
+
+                                // Calculate vertex heights based on water levels
+                                Vector3[] adjustedVerts = new Vector3[4];
+                                bool isTopFace = (d == 2); // +Y is top face (index 2 in Directions)
+                                bool isSideFace = (d == 0 || d == 1 || d == 4 || d == 5); // Horizontal faces
+
+                                if (isTopFace && waterFlow != null)
+                                {
+                                    Vector3Int waterPos = currentWorldPos;
+                                    byte centerLevel = waterFlow.GetWaterLevel(waterPos);
+
+                                    // Minecraft water height formula: full height at level 0, decreasing by 1/9th per level
+                                    float centerHeight = 1f - (centerLevel / 9f);
+
+                                    // Get heights of the 4 corners based on neighbor levels
+                                    // Corner 0: (0, 1, 1) - southwest top
+                                    // Corner 1: (1, 1, 1) - southeast top
+                                    // Corner 2: (1, 1, 0) - northeast top
+                                    // Corner 3: (0, 1, 0) - northwest top
+
+                                    float[] cornerHeights = new float[4];
+                                    Vector3Int[] cornerOffsets = new Vector3Int[]
+                                    {
+                                        new Vector3Int(-1, 0, 1),  // SW: check west and south
+                                        new Vector3Int(1, 0, 1),   // SE: check east and south
+                                        new Vector3Int(1, 0, -1),  // NE: check east and north
+                                        new Vector3Int(-1, 0, -1)  // NW: check west and north
+                                    };
+
+                                    for (int i = 0; i < 4; i++)
+                                    {
+                                        // Minecraft algorithm: average the heights of the 4 blocks surrounding this corner
+                                        // For corner at (x, z), we check blocks at: current, +x, +z, and diagonal (+x,+z)
+                                        Vector3Int offset = cornerOffsets[i];
+
+                                        // The 4 blocks that touch this corner
+                                        Vector3Int[] blocksAtCorner = new Vector3Int[]
+                                        {
+                                            waterPos,                                    // Current block (center)
+                                            waterPos + new Vector3Int(offset.x, 0, 0),  // Adjacent X
+                                            waterPos + new Vector3Int(0, 0, offset.z),  // Adjacent Z
+                                            waterPos + offset                            // Diagonal
+                                        };
+
+                                        float totalHeight = 0f;
+                                        int validCount = 0;
+                                        bool hasAir = false;
+
+                                        // Check all 4 blocks at this corner
+                                        foreach (var blockPos in blocksAtCorner)
+                                        {
+                                            BlockType blockType = world.GetBlockType(blockPos);
+
+                                            if (blockType == BlockType.Water)
+                                            {
+                                                byte level = waterFlow.GetWaterLevel(blockPos);
+                                                float height = 1f - (level / 9f);
+                                                totalHeight += height;
+                                                validCount++;
+                                            }
+                                            else if (blockType == BlockType.Air)
+                                            {
+                                                // Air contributes height 0
+                                                hasAir = true;
+                                                totalHeight += 0f;
+                                                validCount++;
+                                            }
+                                            // Solid blocks don't contribute to corner height
+                                        }
+
+                                        // Average the heights of all contributing blocks
+                                        if (validCount > 0)
+                                        {
+                                            cornerHeights[i] = totalHeight / validCount;
+
+                                            // If there's air at this corner, slightly lower it for better visual flow
+                                            if (hasAir)
+                                            {
+                                                cornerHeights[i] *= 0.9f;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            // No valid blocks, use center height
+                                            cornerHeights[i] = centerHeight;
+                                        }
+                                    }
+
+                                    // Apply corner heights to vertices
+                                    // FaceVerts[2] (+Y top): {(0,1,1), (1,1,1), (1,1,0), (0,1,0)}
+                                    adjustedVerts[0] = basePos + new Vector3(f[0].x, cornerHeights[0], f[0].z);
+                                    adjustedVerts[1] = basePos + new Vector3(f[1].x, cornerHeights[1], f[1].z);
+                                    adjustedVerts[2] = basePos + new Vector3(f[2].x, cornerHeights[2], f[2].z);
+                                    adjustedVerts[3] = basePos + new Vector3(f[3].x, cornerHeights[3], f[3].z);
+                                }
+                                else if (isSideFace && waterFlow != null)
+                                {
+                                    // Side faces - adjust top vertices to match water surface slopes
+                                    // Side face vertices: [bottom-left, top-left, top-right, bottom-right]
+                                    // Top vertices (index 1 and 2) need height adjustment
+
+                                    for (int i = 0; i < 4; i++)
+                                    {
+                                        Vector3 vert = f[i];
+
+                                        // Only adjust top vertices (y = 1)
+                                        if (vert.y == 1f)
+                                        {
+                                            // Calculate which corner this vertex is at
+                                            int xOff = Mathf.RoundToInt(vert.x) == 0 ? -1 : 1;
+                                            int zOff = Mathf.RoundToInt(vert.z) == 0 ? -1 : 1;
+
+                                            // The 4 blocks that touch this corner (same as top face calculation)
+                                            Vector3Int[] blocksAtCorner = new Vector3Int[]
+                                            {
+                                                currentWorldPos,                                      // Current block
+                                                currentWorldPos + new Vector3Int(xOff, 0, 0),        // Adjacent X
+                                                currentWorldPos + new Vector3Int(0, 0, zOff),        // Adjacent Z
+                                                currentWorldPos + new Vector3Int(xOff, 0, zOff)      // Diagonal
+                                            };
+
+                                            float totalHeight = 0f;
+                                            int validCount = 0;
+                                            bool hasAir = false;
+
+                                            // Check all 4 blocks at this corner
+                                            foreach (var blockPos in blocksAtCorner)
+                                            {
+                                                BlockType blockType = world.GetBlockType(blockPos);
+
+                                                if (blockType == BlockType.Water)
+                                                {
+                                                    byte level = waterFlow.GetWaterLevel(blockPos);
+                                                    float height = 1f - (level / 9f);
+                                                    totalHeight += height;
+                                                    validCount++;
+                                                }
+                                                else if (blockType == BlockType.Air)
+                                                {
+                                                    hasAir = true;
+                                                    totalHeight += 0f;
+                                                    validCount++;
+                                                }
+                                            }
+
+                                            float cornerHeight;
+                                            if (validCount > 0)
+                                            {
+                                                cornerHeight = totalHeight / validCount;
+                                                if (hasAir)
+                                                {
+                                                    cornerHeight *= 0.9f;
+                                                }
+                                            }
+                                            else
+                                            {
+                                                byte currentLevel = waterFlow.GetWaterLevel(currentWorldPos);
+                                                cornerHeight = 1f - (currentLevel / 9f);
+                                            }
+
+                                            adjustedVerts[i] = basePos + new Vector3(vert.x, cornerHeight, vert.z);
+                                        }
+                                        else
+                                        {
+                                            // Bottom vertices stay at y=0
+                                            adjustedVerts[i] = basePos + vert;
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    // Bottom face or other - no adjustment
+                                    adjustedVerts[0] = basePos + f[0];
+                                    adjustedVerts[1] = basePos + f[1];
+                                    adjustedVerts[2] = basePos + f[2];
+                                    adjustedVerts[3] = basePos + f[3];
+                                }
+
+                                // Add adjusted vertices
+                                verts.Add(adjustedVerts[0]);
+                                verts.Add(adjustedVerts[1]);
+                                verts.Add(adjustedVerts[2]);
+                                verts.Add(adjustedVerts[3]);
 
                                 // Normal is dir
                                 var n = (Vector3)dir;
                                 norms.Add(n); norms.Add(n); norms.Add(n); norms.Add(n);
-
-                                // Pass world coordinates through UV2 channel for shader world-space calculations
-                                var worldPosUV0 = new Vector2(worldX + f[0].x, worldZ + f[0].z);
-                                var worldPosUV1 = new Vector2(worldX + f[1].x, worldZ + f[1].z);
-                                var worldPosUV2 = new Vector2(worldX + f[2].x, worldZ + f[2].z);
-                                var worldPosUV3 = new Vector2(worldX + f[3].x, worldZ + f[3].z);
 
                                 // Regular UVs for texture mapping
                                 uvs.Add(QuadUV[0]); uvs.Add(QuadUV[1]); uvs.Add(QuadUV[2]); uvs.Add(QuadUV[3]);
@@ -369,7 +578,21 @@ namespace WorldGeneration.Chunks
                                 }
                             }
 
-                            var c = new Color(shade, shade, shade, 1f);
+                            // For water blocks, encode water level in red channel for shader
+                            // For other blocks, use shading color
+                            Color c;
+                            if (t == BlockType.Water)
+                            {
+                                var waterFlow = world?.GetComponent<WaterFlowSystem>();
+                                byte waterLevel = waterFlow != null ? waterFlow.GetWaterLevel(currentWorldPos) : (byte)0;
+                                float levelNormalized = waterLevel / 7f; // Normalize to 0-1 range
+                                // Store level in red, keep shading in green/blue for lighting
+                                c = new Color(levelNormalized, shade, shade, 1f);
+                            }
+                            else
+                            {
+                                c = new Color(shade, shade, shade, 1f);
+                            }
                             colors.Add(c); colors.Add(c); colors.Add(c); colors.Add(c);
 
                             // Simple material selection
@@ -387,6 +610,23 @@ namespace WorldGeneration.Chunks
                             var tri = GetList(faceMat);
                             tri.Add(vi + 0); tri.Add(vi + 1); tri.Add(vi + 2);
                             tri.Add(vi + 0); tri.Add(vi + 2); tri.Add(vi + 3);
+
+                            // Add to collision mesh ONLY if NOT water
+                            if (t != BlockType.Water)
+                            {
+                                int collisionVI = collisionVerts.Count;
+                                collisionVerts.Add(basePos + f[0]);
+                                collisionVerts.Add(basePos + f[1]);
+                                collisionVerts.Add(basePos + f[2]);
+                                collisionVerts.Add(basePos + f[3]);
+
+                                collisionTris.Add(collisionVI + 0);
+                                collisionTris.Add(collisionVI + 1);
+                                collisionTris.Add(collisionVI + 2);
+                                collisionTris.Add(collisionVI + 0);
+                                collisionTris.Add(collisionVI + 2);
+                                collisionTris.Add(collisionVI + 3);
+                            }
                         }
                     }
                 }
@@ -427,9 +667,10 @@ namespace WorldGeneration.Chunks
                 mr.receiveShadows = false;
 
                 // Fix potential culling issues with transparent water
-                // Expand bounds slightly to prevent aggressive frustum culling
+                // Expand bounds significantly to prevent aggressive frustum culling
+                // This ensures water side faces remain visible from all angles and distances
                 var bounds = mesh.bounds;
-                bounds.Expand(2f); // Expand by 2 units in all directions
+                bounds.Expand(100f); // Expand by 100 units - water needs very large bounds for distant visibility
                 mesh.bounds = bounds;
 
             }
@@ -439,7 +680,23 @@ namespace WorldGeneration.Chunks
                 var mc = parent.GetComponent<MeshCollider>();
                 if (mc == null) mc = parent.gameObject.AddComponent<MeshCollider>();
                 mc.sharedMesh = null; // force refresh
-                mc.sharedMesh = mesh;
+
+                // Create separate collision mesh that EXCLUDES water blocks
+                if (collisionVerts.Count > 0 && collisionTris.Count > 0)
+                {
+                    Mesh collisionMesh = new Mesh();
+                    collisionMesh.name = "CollisionMesh_NoWater";
+                    collisionMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+                    collisionMesh.SetVertices(collisionVerts);
+                    collisionMesh.SetTriangles(collisionTris, 0);
+                    collisionMesh.RecalculateBounds();
+                    mc.sharedMesh = collisionMesh;
+                }
+                else
+                {
+                    // No solid blocks in this chunk (only water/air), no collision
+                    mc.sharedMesh = null;
+                }
             }
         }
 

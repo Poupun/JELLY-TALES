@@ -52,6 +52,7 @@ public class UnifiedPlayerInventory : MonoBehaviour
         AddBlock(BlockType.Stone, 32);
         AddBlock(BlockType.Dirt, 16);
         AddBlock(BlockType.Log, 8);
+        AddBlock(BlockType.Water, 16);  // Water blocks for testing flow system
         AddItem(ItemType.Stick, 16);  // Now properly as an item
         AddItem(ItemType.CraftingTable, 2);  // Now properly as an item
     }

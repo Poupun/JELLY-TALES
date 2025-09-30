@@ -291,7 +291,51 @@ public class WorldGenerator : MonoBehaviour
 
     [Header("Water Appearance")]
     [Tooltip("Water color tint")]
-    public Color waterColor = new Color(0.2f, 0.6f, 1f, 0.7f);
+    public Color waterColor = new Color(0.2f, 0.6f, 1f, 0.9f);
+    [Tooltip("Transparency of interior/side water faces (0 = fully transparent, 3 = very opaque)")]
+    [Range(0f, 3f)] public float waterSideOpacity = 0.9f;
+
+    [Header("Water Depth Fog (Surface View)")]
+    [Tooltip("Enable depth fog effect visible from outside water")]
+    public bool enableWaterDepthFog = true;
+    [Tooltip("Color that deep water appears from surface (darker = more dramatic)")]
+    public Color deepWaterColor = new Color(0.05f, 0.15f, 0.3f, 1f);
+    [Tooltip("Depth in blocks at which water reaches maximum darkness")]
+    [Range(5f, 50f)] public float maxWaterDepth = 20f;
+    [Tooltip("Strength of depth fog effect (0 = none, 1 = full)")]
+    [Range(0f, 1f)] public float depthFogIntensity = 0.85f;
+    [Tooltip("Light absorption per water block (higher = darker water per layer)")]
+    [Range(0f, 1f)] public float waterAbsorption = 0.15f;
+
+    [Header("Ocean Floor Fog (From Bottom)")]
+    [Tooltip("Fog color rising from ocean floor (very dark)")]
+    public Color oceanFloorFogColor = new Color(0.02f, 0.05f, 0.1f, 1f);
+    [Tooltip("Distance from ocean floor where fog reaches maximum")]
+    [Range(10f, 100f)] public float oceanFloorFogDistance = 30f;
+    [Tooltip("Intensity of ocean floor fog (0 = none, 1 = very dark)")]
+    [Range(0f, 1f)] public float oceanFloorFogIntensity = 0.7f;
+
+    [Header("Underwater Fog (When Submerged)")]
+    [Tooltip("Enable fog when camera is underwater")]
+    public bool enableUnderwaterFog = true;
+    [Tooltip("Fog color when underwater")]
+    public Color underwaterFogColor = new Color(0.1f, 0.3f, 0.4f, 1f);
+    [Tooltip("Fog density - higher = less visibility")]
+    [Range(0.01f, 0.3f)] public float underwaterFogDensity = 0.08f;
+    [Tooltip("How far you can see underwater in blocks")]
+    [Range(10f, 100f)] public float underwaterVisibilityRange = 35f;
+
+    [Header("Water Physics (Minecraft-style)")]
+    [Tooltip("Horizontal movement speed when swimming in water")]
+    [Range(1f, 10f)] public float swimSpeed = 3f;
+    [Tooltip("Vertical speed when holding space to swim up")]
+    [Range(1f, 10f)] public float swimUpSpeed = 4f;
+    [Tooltip("Gravity multiplier in water (lower = slower falling)")]
+    [Range(0.1f, 1f)] public float waterGravityMultiplier = 0.3f;
+    [Tooltip("Water resistance when moving (higher = more drag)")]
+    [Range(0f, 10f)] public float waterDrag = 3f;
+    [Tooltip("Downward speed when not swimming up")]
+    [Range(0.5f, 15f)] public float waterSinkSpeed = 1f;
 
     // Global water animation synchronization
     private float globalWaterTime = 0f;
@@ -316,6 +360,19 @@ public class WorldGenerator : MonoBehaviour
     private Vector2 _lastWaterWaveDirection = Vector2.zero;
     private Color _lastWaterColor = Color.clear;
     private float _lastWaterTransparency = -1f;
+
+    // Water depth fog parameter tracking
+    private bool _lastEnableWaterDepthFog = false;
+    private Color _lastDeepWaterColor = Color.clear;
+    private float _lastMaxWaterDepth = -1f;
+    private float _lastDepthFogIntensity = -1f;
+    private float _lastWaterAbsorption = -1f;
+    private Color _lastOceanFloorFogColor = Color.clear;
+    private float _lastOceanFloorFogDistance = -1f;
+    private float _lastOceanFloorFogIntensity = -1f;
+    private bool _lastEnableUnderwaterFog = false;
+    private Color _lastUnderwaterFogColor = Color.clear;
+    private float _lastUnderwaterFogDensity = -1f;
 
     [Header("Debug / Reload")] 
     [Tooltip("If true, a reload will discard persisted chunk edits (fresh world)." )]
@@ -370,11 +427,34 @@ public class WorldGenerator : MonoBehaviour
         // Water animation is now handled by world-space shaders - no additional components needed
         Debug.Log("Water animation using world-space shader approach for seamless chunk boundaries");
 
+        // Ensure UnderwaterFogManager exists for depth-based water fog effects
+        var underwaterFog = FindFirstObjectByType<UnderwaterFogManager>();
+        if (underwaterFog == null)
+        {
+            var fogGO = new GameObject("UnderwaterFogManager");
+            underwaterFog = fogGO.AddComponent<UnderwaterFogManager>();
+            underwaterFog.worldGenerator = this;
+            Debug.Log("UnderwaterFogManager component created for water depth fog effects");
+        }
+
+        // Sync initial fog settings from WorldGenerator to UnderwaterFogManager
+        underwaterFog.enableUnderwaterFog = enableUnderwaterFog;
+        underwaterFog.underwaterFogColor = underwaterFogColor;
+        underwaterFog.underwaterFogDensity = underwaterFogDensity;
+        underwaterFog.underwaterVisibilityRange = underwaterVisibilityRange;
+        underwaterFog.enableSurfaceDepthFog = enableWaterDepthFog;
+        underwaterFog.deepWaterColor = deepWaterColor;
+        underwaterFog.maxDepthForDarkening = maxWaterDepth;
+
     // Try to find TextureVariationManager if already configured in the scene (optional)
     textureManager = GetComponent<TextureVariationManager>();
 
         LoadTextures();
         CreateBlockMaterials();
+
+        // Initialize water depth fog properties after materials are created
+        UpdateWaterDepthFogProperties();
+        Debug.Log("Initial water depth fog properties applied");
 
         // Ensure a F3 debug overlay exists; avoid compile-time dependency via reflection.
         try
@@ -726,6 +806,52 @@ public class WorldGenerator : MonoBehaviour
 
                 // Force sync all water materials every frame to prevent drift
                 SyncAllWaterMaterials();
+            }
+
+            // Live water depth fog parameter updates
+            if (enableWaterDepthFog != _lastEnableWaterDepthFog ||
+                deepWaterColor != _lastDeepWaterColor ||
+                Mathf.Abs(maxWaterDepth - _lastMaxWaterDepth) > 0.01f ||
+                Mathf.Abs(depthFogIntensity - _lastDepthFogIntensity) > 0.01f ||
+                Mathf.Abs(waterAbsorption - _lastWaterAbsorption) > 0.01f ||
+                oceanFloorFogColor != _lastOceanFloorFogColor ||
+                Mathf.Abs(oceanFloorFogDistance - _lastOceanFloorFogDistance) > 0.01f ||
+                Mathf.Abs(oceanFloorFogIntensity - _lastOceanFloorFogIntensity) > 0.01f)
+            {
+                _lastEnableWaterDepthFog = enableWaterDepthFog;
+                _lastDeepWaterColor = deepWaterColor;
+                _lastMaxWaterDepth = maxWaterDepth;
+                _lastDepthFogIntensity = depthFogIntensity;
+                _lastWaterAbsorption = waterAbsorption;
+                _lastOceanFloorFogColor = oceanFloorFogColor;
+                _lastOceanFloorFogDistance = oceanFloorFogDistance;
+                _lastOceanFloorFogIntensity = oceanFloorFogIntensity;
+
+                // Update water material depth fog properties
+                UpdateWaterDepthFogProperties();
+            }
+
+            // Live underwater fog parameter updates
+            if (enableUnderwaterFog != _lastEnableUnderwaterFog ||
+                underwaterFogColor != _lastUnderwaterFogColor ||
+                Mathf.Abs(underwaterFogDensity - _lastUnderwaterFogDensity) > 0.001f)
+            {
+                _lastEnableUnderwaterFog = enableUnderwaterFog;
+                _lastUnderwaterFogColor = underwaterFogColor;
+                _lastUnderwaterFogDensity = underwaterFogDensity;
+
+                // Update UnderwaterFogManager if it exists
+                var fogManager = FindFirstObjectByType<UnderwaterFogManager>();
+                if (fogManager != null)
+                {
+                    fogManager.enableUnderwaterFog = enableUnderwaterFog;
+                    fogManager.underwaterFogColor = underwaterFogColor;
+                    fogManager.underwaterFogDensity = underwaterFogDensity;
+                    fogManager.underwaterVisibilityRange = underwaterVisibilityRange;
+                    fogManager.enableSurfaceDepthFog = enableWaterDepthFog;
+                    fogManager.deepWaterColor = deepWaterColor;
+                    fogManager.maxDepthForDarkening = maxWaterDepth;
+                }
             }
             // Start background chunk loads (removed frame time restriction for faster loading)
             int budget = Mathf.Max(1, maxChunkLoadsPerFrame);
@@ -1664,17 +1790,24 @@ public class WorldGenerator : MonoBehaviour
     [ContextMenu("Update Water Appearance")]
     public void UpdateWaterAppearance()
     {
-        Debug.Log("UpdateWaterAppearance() called - clearing material cache to regenerate water");
-
-        // Force refresh of existing chunks that contain water (only during play mode)
+        // For fog properties, we don't need to recreate materials - just update shader properties
+        // Only do full refresh if textures or major settings changed
         if (Application.isPlaying)
         {
-            RefreshWaterChunks();
+            // Just update the existing water material properties instead of recreating everything
+            UpdateWaterDepthFogProperties();
+            Debug.Log("Updated water fog properties");
         }
     }
 
     private void RefreshWaterChunks()
     {
+        // Prevent execution during editor validation to avoid SendMessage warnings
+        if (!Application.isPlaying)
+        {
+            return;
+        }
+
         // Only refresh if BlockManager is properly initialized
         if (BlockManager.Instance == null)
         {
@@ -1762,6 +1895,93 @@ public class WorldGenerator : MonoBehaviour
                 (material.shader.name.Contains("Wind") || material.shader.name.Contains("Wave")));
     }
 
+    /// <summary>
+    /// Updates water material depth fog properties for surface viewing
+    /// </summary>
+    private void UpdateWaterDepthFogProperties()
+    {
+        if (blockMaterials == null || (int)BlockType.Water >= blockMaterials.Length)
+        {
+            Debug.LogWarning("UpdateWaterDepthFogProperties: blockMaterials not ready");
+            return;
+        }
+
+        Material waterMaterial = blockMaterials[(int)BlockType.Water];
+        if (waterMaterial == null)
+        {
+            Debug.LogWarning("UpdateWaterDepthFogProperties: water material is null");
+            return;
+        }
+
+        Debug.Log($"Updating water depth fog properties - Shader: {waterMaterial.shader?.name}");
+
+        // Update shader properties for depth fog
+        bool hasDepthFogColor = waterMaterial.HasProperty("_DepthFogColor");
+        bool hasMaxDepth = waterMaterial.HasProperty("_MaxDepthDarkening");
+        bool hasIntensity = waterMaterial.HasProperty("_DepthFogIntensity");
+        bool hasAbsorption = waterMaterial.HasProperty("_WaterAbsorption");
+        bool hasFloorFogColor = waterMaterial.HasProperty("_OceanFloorFogColor");
+        bool hasFloorFogDistance = waterMaterial.HasProperty("_OceanFloorFogDistance");
+        bool hasFloorFogIntensity = waterMaterial.HasProperty("_OceanFloorFogIntensity");
+
+        Debug.Log($"Shader properties - DepthFogColor: {hasDepthFogColor}, MaxDepth: {hasMaxDepth}, Intensity: {hasIntensity}, Absorption: {hasAbsorption}, FloorFog: {hasFloorFogColor}");
+
+        if (hasDepthFogColor)
+        {
+            waterMaterial.SetColor("_DepthFogColor", deepWaterColor);
+            Debug.Log($"Set _DepthFogColor to {deepWaterColor}");
+        }
+
+        if (hasMaxDepth)
+        {
+            waterMaterial.SetFloat("_MaxDepthDarkening", maxWaterDepth);
+            Debug.Log($"Set _MaxDepthDarkening to {maxWaterDepth}");
+        }
+
+        if (hasIntensity)
+        {
+            float intensity = enableWaterDepthFog ? depthFogIntensity : 0f;
+            waterMaterial.SetFloat("_DepthFogIntensity", intensity);
+            Debug.Log($"Set _DepthFogIntensity to {intensity} (enabled: {enableWaterDepthFog})");
+        }
+
+        if (hasAbsorption)
+        {
+            waterMaterial.SetFloat("_WaterAbsorption", waterAbsorption);
+            Debug.Log($"Set _WaterAbsorption to {waterAbsorption}");
+        }
+
+        if (hasFloorFogColor)
+        {
+            waterMaterial.SetColor("_OceanFloorFogColor", oceanFloorFogColor);
+            Debug.Log($"Set _OceanFloorFogColor to {oceanFloorFogColor}");
+        }
+
+        if (hasFloorFogDistance)
+        {
+            waterMaterial.SetFloat("_OceanFloorFogDistance", oceanFloorFogDistance);
+            Debug.Log($"Set _OceanFloorFogDistance to {oceanFloorFogDistance}");
+        }
+
+        if (hasFloorFogIntensity)
+        {
+            waterMaterial.SetFloat("_OceanFloorFogIntensity", oceanFloorFogIntensity);
+            Debug.Log($"Set _OceanFloorFogIntensity to {oceanFloorFogIntensity}");
+        }
+
+        if (waterMaterial.HasProperty("_WaterSideOpacity"))
+        {
+            waterMaterial.SetFloat("_WaterSideOpacity", waterSideOpacity);
+            Debug.Log($"Set _WaterSideOpacity to {waterSideOpacity}");
+        }
+
+        // Also update global shader properties
+        Shader.SetGlobalColor("_DepthFogColor", deepWaterColor);
+        Shader.SetGlobalFloat("_MaxDepthDarkening", maxWaterDepth);
+
+        Debug.Log("Water depth fog properties update complete");
+    }
+
     private void SyncWaterMaterialToGlobalTime(Material material)
     {
         if (material == null) return;
@@ -1837,14 +2057,23 @@ public class WorldGenerator : MonoBehaviour
         return false;
     }
 
-    // Editor method to update water appearance when values change in inspector
+    // Editor method to update water fog properties when values change in inspector
     void OnValidate()
     {
-        // Only update water appearance if BlockManager is properly initialized
-        if (Application.isPlaying && BlockManager.Instance != null)
+        // Only update if in play mode and materials exist
+        if (Application.isPlaying && blockMaterials != null)
         {
-            UpdateWaterAppearance();
-            SyncWaterAnimationParameters();
+#if UNITY_EDITOR
+            // Defer to next editor update to avoid SendMessage restrictions in OnValidate
+            UnityEditor.EditorApplication.delayCall += () =>
+            {
+                if (this != null && Application.isPlaying && blockMaterials != null)
+                {
+                    // Just update shader properties - no need to recreate materials
+                    UpdateWaterDepthFogProperties();
+                }
+            };
+#endif
         }
     }
 
@@ -2791,9 +3020,12 @@ public class WorldGenerator : MonoBehaviour
         }
     }
     
-    public bool PlaceBlock(Vector3Int position, BlockType blockType)
+    public bool PlaceBlock(Vector3Int position, BlockType blockType, bool skipMeshUpdate = false)
     {
         if (IsOutOfBounds(position)) return false;
+
+        // Store old block type for water flow system
+        BlockType oldBlockType = GetBlockType(position);
 
         if (useChunkStreaming)
         {
@@ -2985,11 +3217,34 @@ public class WorldGenerator : MonoBehaviour
                 ScheduleGrassGrowth(position, dirtToGrassDelayTicks);
             }
         }
-        
+
     // Update neighboring blocks visibility / rebuild meshes as needed
-    UpdateNeighboringBlocks(position);
-        
-        
+    if (!skipMeshUpdate)
+    {
+        UpdateNeighboringBlocks(position);
+    }
+
+    // Notify water flow system
+    var waterFlow = GetComponent<WaterFlowSystem>();
+    if (waterFlow != null && waterFlow.enabled)
+    {
+        // If placing water source block, register it
+        if (blockType == BlockType.Water && oldBlockType == BlockType.Air)
+        {
+            waterFlow.PlaceWaterSource(position);
+        }
+        // If removing a block, notify (water might flow)
+        else if (blockType == BlockType.Air && oldBlockType != BlockType.Air)
+        {
+            waterFlow.OnBlockRemoved(position, oldBlockType);
+        }
+        // Otherwise just notify placement (might block water flow)
+        else
+        {
+            waterFlow.OnBlockPlaced(position);
+        }
+    }
+
         return true;
     }
 
@@ -3452,6 +3707,17 @@ public class WorldGenerator : MonoBehaviour
         {
             int usefulY = Mathf.Min(worldHeight, chunk.sizeY); // full vertical scan within world bounds
             BuildChunkPlants(chunk, usefulY);
+        }
+    }
+
+    /// <summary>
+    /// Public method to update a chunk's mesh (used by water flow system)
+    /// </summary>
+    public void UpdateChunkMesh(Vector2Int coord)
+    {
+        if (useChunkMeshing)
+        {
+            RebuildChunkMeshAt(coord);
         }
     }
 
@@ -4528,8 +4794,9 @@ public class WorldGenerator : MonoBehaviour
             // Stop if out of vertical bounds
             if (cell.y < 0 || cell.y >= worldHeight) return false;
 
-            // Check for solid block
-            if (GetBlockType(cell) != BlockType.Air)
+            // Check for solid block (Minecraft logic: pass through water, stop at solid)
+            BlockType blockType = GetBlockType(cell);
+            if (blockType != BlockType.Air && blockType != BlockType.Water)
             {
                 hitCell = cell;
                 placeCell = prevCell;

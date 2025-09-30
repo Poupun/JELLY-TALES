@@ -22,7 +22,9 @@
       "WebFetch(domain:gamedev.stackexchange.com)",
       "WebFetch(domain:0fps.net)",
       "WebFetch(domain:stackoverflow.com)",
-      "WebFetch(domain:discussions.unity.com)"
+      "WebFetch(domain:discussions.unity.com)",
+      "Bash(claude mcp:*)",
+      "Bash(awk:*)"
     ],
     "deny": [
       "mcp__UnityMCP__manage_editor"
