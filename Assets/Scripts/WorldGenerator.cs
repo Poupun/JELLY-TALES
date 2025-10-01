@@ -1430,6 +1430,9 @@ public class WorldGenerator : MonoBehaviour
     {
         if (worldPos.y < 0 || worldPos.y >= worldHeight) return BlockType.Air;
 
+        // CRITICAL WARNING: This method ONLY generates TERRAIN blocks (grass, dirt, stone, water, air)
+        // It does NOT know about VEGETATION (trees, leaves) which are placed AFTER terrain generation!
+
         // Bedrock layer (unbreakable foundation)
         if (worldPos.y <= 2) return BlockType.Bedrock;
 
@@ -1890,9 +1893,9 @@ public class WorldGenerator : MonoBehaviour
 
     private bool IsWaterMaterial(Material material)
     {
-        return material.name.Contains("Water") ||
-               (material.shader != null &&
-                (material.shader.name.Contains("Wind") || material.shader.name.Contains("Wave")));
+        // Only check material name, NOT shader name
+        // Leaves materials have Wind shaders but are NOT water!
+        return material != null && material.name.Contains("Water");
     }
 
     /// <summary>
@@ -2974,6 +2977,7 @@ public class WorldGenerator : MonoBehaviour
     
     public BlockType GetBlockType(Vector3Int position)
     {
+        BlockType result;
         if (useChunkStreaming)
         {
             if (IsOutOfBounds(position)) return BlockType.Air;
@@ -2981,16 +2985,37 @@ public class WorldGenerator : MonoBehaviour
             if (_chunks.TryGetValue(cc, out var chunk))
             {
                 var lp = chunk.WorldToLocal(position);
-                return chunk.GetLocal(lp.x, lp.y, lp.z);
+                result = chunk.GetLocal(lp.x, lp.y, lp.z);
+
+                // DEBUG: Log when we find leaves
+                if (result == BlockType.Leaves)
+                {
+                    Debug.Log($"GetBlockType: Found LEAVES at {position} (chunk {cc}, local {lp})");
+                }
             }
-            // Not loaded: treat as Air for visibility; if needed, could compute procedural type
-            return BlockType.Air;
+            else
+            {
+                // Chunk not loaded - return Air to indicate unknown/unloaded
+                // (We can't load it here without causing infinite loop)
+                return BlockType.Air;
+            }
         }
         else
         {
             if (IsOutOfBounds(position)) return BlockType.Air;
-            return worldData[position.x, position.y, position.z];
+            result = worldData[position.x, position.y, position.z];
         }
+
+        return result;
+    }
+
+    // Check if a chunk is loaded at a given position
+    public bool IsChunkLoadedAt(Vector3Int position)
+    {
+        if (!useChunkStreaming) return true;
+        if (IsOutOfBounds(position)) return false;
+        var cc = WorldToChunkCoord(position);
+        return _chunks.ContainsKey(cc);
     }
 
     // Chunk-aware peek used during generation within an owning chunk.
@@ -3026,6 +3051,25 @@ public class WorldGenerator : MonoBehaviour
 
         // Store old block type for water flow system
         BlockType oldBlockType = GetBlockType(position);
+
+        // Prevent water from replacing leaves
+        if (blockType == BlockType.Water && oldBlockType == BlockType.Leaves)
+        {
+            Debug.LogError($"WorldGenerator.PlaceBlock: BLOCKING WATER at {position}! Would replace Leaves.");
+            return false;
+        }
+
+        // Log all water placements for debugging
+        if (blockType == BlockType.Water)
+        {
+            Debug.Log($"WorldGenerator.PlaceBlock: Placing WATER at {position}, replacing {oldBlockType}");
+        }
+
+        // Log when leaves are being replaced by anything
+        if (oldBlockType == BlockType.Leaves)
+        {
+            Debug.LogError($"WorldGenerator.PlaceBlock: LEAVES at {position} being replaced by {blockType}!");
+        }
 
         if (useChunkStreaming)
         {

@@ -13,22 +13,25 @@ public class WaterFlowSystem : MonoBehaviour
     public int maxFlowDistance = 7;
 
     [Tooltip("Tick rate for water updates (seconds)")]
-    [Range(0.1f, 2f)]
-    public float waterTickRate = 0.5f;
+    [Range(0.1f, 5f)]
+    public float waterTickRate = 0.2f;
 
     [Tooltip("Enable water flow simulation")]
     public bool enableWaterFlow = true;
 
-    [Tooltip("Max water blocks to update per tick")]
-    [Range(10, 500)]
-    public int maxUpdatesPerTick = 100;
+    [Tooltip("Max water blocks to process per tick")]
+    [Range(1, 50)]
+    public int maxBlocksToProcessPerTick = 5;
 
     [Tooltip("How often to update chunk meshes (every N ticks)")]
-    [Range(1, 10)]
-    public int meshUpdateInterval = 5;
+    [Range(1, 20)]
+    public int meshUpdateInterval = 2;
 
     // Water level storage: position -> level (0 = source, 1-7 = flowing)
     private Dictionary<Vector3Int, byte> waterLevels = new Dictionary<Vector3Int, byte>();
+
+    // Queue of water blocks that need to be processed
+    private Queue<Vector3Int> waterQueue = new Queue<Vector3Int>();
 
     private WorldGenerator worldGenerator;
     private float tickTimer = 0f;
@@ -75,6 +78,7 @@ public class WaterFlowSystem : MonoBehaviour
 
         // Register as source block (level 0)
         waterLevels[pos] = 0;
+        waterQueue.Enqueue(pos);
         Debug.Log($"WaterFlowSystem: Registered water source at {pos}");
     }
 
@@ -83,49 +87,63 @@ public class WaterFlowSystem : MonoBehaviour
     /// </summary>
     private void ProcessWaterUpdates()
     {
-        if (waterLevels.Count == 0) return;
+        if (waterQueue.Count == 0) return;
 
-        // Make a snapshot to avoid modification during iteration
-        var waterSnapshot = new List<KeyValuePair<Vector3Int, byte>>(waterLevels);
-
-        int updates = 0;
+        int blocksProcessed = 0;
 
         isSpreading = true;
 
-        foreach (var kvp in waterSnapshot)
+        while (waterQueue.Count > 0 && blocksProcessed < maxBlocksToProcessPerTick)
         {
-            if (updates >= maxUpdatesPerTick) break;
+            Vector3Int pos = waterQueue.Dequeue();
+            blocksProcessed++;
 
-            Vector3Int pos = kvp.Key;
-            byte level = kvp.Value;
+            // Skip if water no longer exists at this position
+            if (!waterLevels.TryGetValue(pos, out byte level))
+            {
+                continue;
+            }
 
-            // Skip if water was removed
+            // Verify block is still water
             if (worldGenerator.GetBlockType(pos) != BlockType.Water)
             {
                 waterLevels.Remove(pos);
                 continue;
             }
 
-            // Try to flow down first - water falls as far as it can
-            Vector3Int checkPos = pos;
+            // Try to flow down first - water falls ONE block per tick for gradual flow
+            Vector3Int below = pos + Vector3Int.down;
             bool fell = false;
 
-            // Keep falling until hitting something solid
-            for (int i = 0; i < 50; i++) // Max 50 blocks per tick
+            if (below.y >= 0)
             {
-                Vector3Int below = checkPos + Vector3Int.down;
-                if (below.y < 0) break; // Hit bottom of world
+                // Check if chunk is loaded before flowing down
+                if (!worldGenerator.IsChunkLoadedAt(below))
+                {
+                    Debug.Log($"WaterFlowSystem: Chunk not loaded below {below}, skipping fall");
+                    continue;
+                }
 
                 BlockType blockBelow = worldGenerator.GetBlockType(below);
 
-                if (blockBelow == BlockType.Air)
+                // Only fall through Air or Water, NOT leaves or other blocks
+                if (blockBelow == BlockType.Air || blockBelow == BlockType.Water)
                 {
-                    // Water can fall here
-                    if (!waterLevels.ContainsKey(below))
+                    // Water can fall here (only if it's truly air, not water)
+                    if (blockBelow == BlockType.Air && !waterLevels.ContainsKey(below))
                     {
+                        // Double-check it's truly air before placing
+                        BlockType doubleCheck = worldGenerator.GetBlockType(below);
+                        if (doubleCheck != BlockType.Air)
+                        {
+                            Debug.LogWarning($"WaterFlowSystem: BLOCKED falling to {below} - was Air, now {doubleCheck}!");
+                            continue;
+                        }
+
+                        Debug.Log($"WaterFlowSystem: Water falling from {pos} to {below}");
                         waterLevels[below] = 0; // Falling water becomes source
+                        waterQueue.Enqueue(below); // Add to queue for processing
                         worldGenerator.PlaceBlock(below, BlockType.Water, skipMeshUpdate: true);
-                        updates++;
                         fell = true;
 
                         // Mark chunk as dirty
@@ -135,15 +153,7 @@ public class WaterFlowSystem : MonoBehaviour
                         );
                         dirtyChunks.Add(chunkCoord);
                     }
-                    checkPos = below; // Continue falling
                 }
-                else
-                {
-                    // Hit a solid block, stop falling
-                    break;
-                }
-
-                if (updates >= maxUpdatesPerTick) break;
             }
 
             // If water fell, don't spread horizontally this tick
@@ -155,16 +165,10 @@ public class WaterFlowSystem : MonoBehaviour
                 byte nextLevel = (byte)(level + 1);
 
                 // Try all 4 horizontal directions
-                TrySpreadTo(pos + Vector3Int.right, nextLevel, ref updates, maxUpdatesPerTick);
-                if (updates >= maxUpdatesPerTick) break;
-
-                TrySpreadTo(pos + Vector3Int.left, nextLevel, ref updates, maxUpdatesPerTick);
-                if (updates >= maxUpdatesPerTick) break;
-
-                TrySpreadTo(pos + Vector3Int.forward, nextLevel, ref updates, maxUpdatesPerTick);
-                if (updates >= maxUpdatesPerTick) break;
-
-                TrySpreadTo(pos + Vector3Int.back, nextLevel, ref updates, maxUpdatesPerTick);
+                TrySpreadTo(pos + Vector3Int.right, nextLevel);
+                TrySpreadTo(pos + Vector3Int.left, nextLevel);
+                TrySpreadTo(pos + Vector3Int.forward, nextLevel);
+                TrySpreadTo(pos + Vector3Int.back, nextLevel);
             }
         }
 
@@ -184,17 +188,37 @@ public class WaterFlowSystem : MonoBehaviour
         }
     }
 
-    private void TrySpreadTo(Vector3Int targetPos, byte level, ref int updateCount, int maxUpdates)
+    private void TrySpreadTo(Vector3Int targetPos, byte level)
     {
-        if (updateCount >= maxUpdates) return;
-
         // Check bounds
         if (targetPos.y < 0 || targetPos.y >= worldGenerator.worldHeight) return;
 
+        // CRITICAL: Check if chunk is loaded FIRST
+        // If chunk isn't loaded, we don't know if there's a tree there
+        // DON'T spread to unloaded chunks to prevent destroying trees
+        if (!worldGenerator.IsChunkLoadedAt(targetPos))
+        {
+            Debug.Log($"WaterFlowSystem: Chunk not loaded at {targetPos}, skipping water spread (may have trees)");
+            return;
+        }
+
         BlockType targetBlock = worldGenerator.GetBlockType(targetPos);
 
-        // Can only spread to air
-        if (targetBlock != BlockType.Air) return;
+        // Can only spread to air (not water, not leaves, not anything else)
+        if (targetBlock != BlockType.Air)
+        {
+            if (targetBlock == BlockType.Leaves)
+            {
+                Debug.LogError($"WaterFlowSystem: BLOCKED! Tried to spread to LEAVES at {targetPos}!");
+            }
+            else
+            {
+                Debug.Log($"WaterFlowSystem: Blocked spreading to {targetPos} - block is: {targetBlock}");
+            }
+            return;
+        }
+
+        Debug.Log($"WaterFlowSystem: Target {targetPos} is Air, will spread there");
 
         // Check if water already exists
         if (waterLevels.ContainsKey(targetPos))
@@ -207,10 +231,19 @@ public class WaterFlowSystem : MonoBehaviour
             return;
         }
 
+        // Double-check it's still air before placing
+        BlockType finalCheck = worldGenerator.GetBlockType(targetPos);
+        if (finalCheck != BlockType.Air)
+        {
+            Debug.LogWarning($"WaterFlowSystem: BLOCKED spreading to {targetPos} - target changed to {finalCheck}!");
+            return;
+        }
+
         // Place flowing water at this position
+        Debug.Log($"WaterFlowSystem: Water spreading to {targetPos} at level {level}");
         waterLevels[targetPos] = level;
+        waterQueue.Enqueue(targetPos); // Add to queue for processing
         worldGenerator.PlaceBlock(targetPos, BlockType.Water, skipMeshUpdate: true);
-        updateCount++;
 
         // Mark chunk as dirty
         Vector2Int chunkCoord = new Vector2Int(
@@ -219,38 +252,7 @@ public class WaterFlowSystem : MonoBehaviour
         );
         dirtyChunks.Add(chunkCoord);
 
-        // If there's air below, water should fall immediately
-        Vector3Int below = targetPos + Vector3Int.down;
-        if (below.y >= 0)
-        {
-            BlockType blockBelow = worldGenerator.GetBlockType(below);
-
-            if (blockBelow == BlockType.Air)
-            {
-                // Water falls down from this newly placed position
-                Vector3Int checkPos = targetPos;
-                for (int i = 0; i < 50; i++) // Max 50 blocks fall
-                {
-                    Vector3Int belowCheck = checkPos + Vector3Int.down;
-                    if (belowCheck.y < 0) break;
-
-                    BlockType belowType = worldGenerator.GetBlockType(belowCheck);
-                    if (belowType == BlockType.Air && !waterLevels.ContainsKey(belowCheck))
-                    {
-                        waterLevels[belowCheck] = 0; // Falling water becomes source
-                        worldGenerator.PlaceBlock(belowCheck, BlockType.Water, skipMeshUpdate: true);
-                        updateCount++;
-                        checkPos = belowCheck;
-                    }
-                    else
-                    {
-                        break;
-                    }
-
-                    if (updateCount >= maxUpdates) break;
-                }
-            }
-        }
+        // Water will fall on the next tick (gradual falling instead of instant cascade)
     }
 
     public void OnBlockPlaced(Vector3Int pos)

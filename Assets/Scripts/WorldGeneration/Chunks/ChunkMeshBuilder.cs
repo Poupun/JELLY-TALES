@@ -64,6 +64,11 @@ namespace WorldGeneration.Chunks
                 if (faceDirection == 2) // +Y is index 2
                     return true;
 
+                // Don't render water faces against leaves to prevent visual overlap
+                // (Both water and leaves are semi-transparent)
+                if (neighborBlock == BlockType.Leaves)
+                    return false;
+
                 // Always render faces against other non-water blocks
                 if (neighborBlock != BlockType.Water)
                     return true;
@@ -606,6 +611,12 @@ namespace WorldGeneration.Chunks
                                 }
                             }
                             if (faceMat == null) continue; // skip if no material configured
+
+                            // DEBUG: Check if leaves are getting wrong material
+                            if (t == BlockType.Leaves && faceMat != null && faceMat.name.Contains("Water"))
+                            {
+                                UnityEngine.Debug.LogError($"ChunkMeshBuilder: LEAVES at {currentWorldPos} getting WATER material! Material name: {faceMat.name}");
+                            }
 
                             var tri = GetList(faceMat);
                             tri.Add(vi + 0); tri.Add(vi + 1); tri.Add(vi + 2);
