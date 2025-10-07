@@ -85,7 +85,7 @@ public class WaterFlowSystem : MonoBehaviour
     /// <summary>
     /// Process all water updates
     /// </summary>
-    private void ProcessWaterUpdates()
+    public void ProcessWaterUpdates()
     {
         if (waterQueue.Count == 0) return;
 

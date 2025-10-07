@@ -1,7 +1,7 @@
 using System.Collections;
 using UnityEngine;
 
-//yo
+//yos
 
 
 public class CameraShake : MonoBehaviour

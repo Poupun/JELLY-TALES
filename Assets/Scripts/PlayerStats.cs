@@ -10,7 +10,7 @@ public class PlayerStats : MonoBehaviour
     [Header("Hunger Settings")]
     [Range(1, 100)]
     public int maxHunger = 20;
-    public float hungerDecayRate = 1f; // Per minute
+    public float hungerDecayRate = 1f; // Pesr minute
     public int healthLossOnStarvation = 1;
     public float starvationInterval = 4f; // Seconds between health loss when starving
     

@@ -153,6 +153,14 @@ public class WorldGenerator : MonoBehaviour
     [Tooltip("Maximum depth of ocean floors below sea level")]
     public int maxOceanDepth = 40;
 
+    [Header("Debug: Biome Spawn Testing")]
+    [Tooltip("Enable this to spawn player on a beach biome transition for testing")]
+    public bool debugSpawnOnBeach = false;
+    [Tooltip("Teleport player to beach on EVERY world load/reload (useful for quick testing)")]
+    public bool debugAlwaysTeleportToBeach = false;
+    [Tooltip("Maximum search radius (in chunks) to find a beach spawn point")]
+    [Range(1, 100)] public int debugBeachSearchRadius = 50;
+
     [Header("Ocean Water Appearance")]
     [Tooltip("Water transparency (0 = invisible, 1 = normal, 5 = very opaque)")]
     [Range(0f, 5f)] public float waterTransparency = 0.7f;
@@ -1439,30 +1447,46 @@ public class WorldGenerator : MonoBehaviour
         // Get biome data to determine surface/underground boundary
         BiomeData biome = GetBiomeDataAt(worldPos);
 
-        // Check for NEW tunnel system FIRST at all Y levels - but avoid water areas in ocean biomes
-        if (enableTunnels && WorldGeneration.HorizontalTunnelGenerator.IsTunnelBlock(worldPos, worldSeed, tunnelSettings))
+        // Check for NEW tunnel system FIRST at all Y levels - but avoid water areas in ocean/beach biomes
+        if (enableTunnels)
         {
-            // Don't generate tunnels in water areas OR sandy ocean floor of ocean biomes
-            int oceanFloor = GetColumnTopY(worldPos.x, worldPos.z);
-            if (biome.type == BiomeType.Ocean && worldPos.y >= oceanFloor - 2 && worldPos.y <= biome.waterLevel)
+            // BEACH BIOMES: Never generate caves/tunnels - beaches should be solid sand
+            if (biome.type == BiomeType.Beach)
             {
-                // This would be ocean floor sand or water block, so don't replace with tunnel air
-                // Fall through to normal generation
+                // Beach areas are completely cave-free zones for clean, natural looking shores
+                // Skip tunnel check entirely for beaches
             }
-            else
+            else if (WorldGeneration.HorizontalTunnelGenerator.IsTunnelBlock(worldPos, worldSeed, tunnelSettings))
             {
-                return BlockType.Air; // Tunnel air space
+                // Don't generate tunnels in water areas OR sandy floor of ocean biomes
+                if (biome.type == BiomeType.Ocean)
+                {
+                    // For ocean biomes, don't cut through the sandy floor or water
+                    // Simple check: if we're above Y=20 (near surface), skip tunnels
+                    if (worldPos.y > 20)
+                    {
+                        // Fall through to normal ocean generation
+                    }
+                    else
+                    {
+                        return BlockType.Air; // Tunnel air space in deep ocean underground
+                    }
+                }
+                else
+                {
+                    return BlockType.Air; // Tunnel air space in other biomes
+                }
             }
         }
 
-        int surfaceThreshold = biome.type == BiomeType.Ocean ? biome.waterLevel : 99;
+        int surfaceThreshold = (biome.type == BiomeType.Ocean || biome.type == BiomeType.Beach) ? biome.waterLevel : 99;
 
 
         // Deep underground layers - Only generate solid blocks if no cave
         if (worldPos.y <= surfaceThreshold)
         {
-            // For ocean biomes, use surface generation for all positions near water level
-            if (biome.type == BiomeType.Ocean && worldPos.y > 20) // Ocean surface generation starts at Y=20
+            // For ocean/beach biomes, use surface generation for all positions near water level
+            if ((biome.type == BiomeType.Ocean || biome.type == BiomeType.Beach) && worldPos.y > 20)
             {
                 return GenerateSurfaceBlock(worldPos);
             }
@@ -1623,6 +1647,29 @@ public class WorldGenerator : MonoBehaviour
             return biome.surfaceBlock;
         }
 
+        // Handle beach biome (transition zone with shallow water)
+        if (biome.type == BiomeType.Beach)
+        {
+            // Above sea level = air
+            if (worldPos.y > biome.waterLevel)
+            {
+                return BlockType.Air;
+            }
+
+            // At or below sea level but above beach surface = shallow water
+            if (worldPos.y > surfaceHeight && worldPos.y <= biome.waterLevel)
+            {
+                return BlockType.Water;
+            }
+
+            // Beach terrain (ALWAYS SAND - no dirt or grass in beach biome)
+            // Sand extends VERY deep to prevent any underground interference
+            if (worldPos.y < surfaceHeight - 15) return BlockType.Stone;      // Stone only very far down (15+ blocks)
+            if (worldPos.y <= surfaceHeight) return BlockType.Sand;           // ALL sand from surface down to deep stone
+
+            return BlockType.Air;
+        }
+
         // Handle regular biomes (Plains, etc.)
         if (worldPos.y < surfaceHeight - 4) return biome.deepBlock;           // Deep stone
         if (worldPos.y < surfaceHeight) return biome.subSurfaceBlock;         // Dirt
@@ -1679,6 +1726,81 @@ public class WorldGenerator : MonoBehaviour
             float ripple = Mathf.Sin(rippleX * 5f) * Mathf.Sin(rippleZ * 5f) * 0.3f;
 
             waveNoise = wave1 + wave2 + ripple;
+        }
+
+        // BEACH BIOME: Create diagonal slope by blending ACTUAL plains and ocean heights
+        if (biome.type == BiomeType.Beach)
+        {
+            // Find nearest actual plains and ocean positions to get REAL terrain heights
+            int sampleRadius = 50;
+            Vector2Int nearestPlains = Vector2Int.zero;
+            Vector2Int nearestOcean = Vector2Int.zero;
+            float minPlainsDist = float.MaxValue;
+            float minOceanDist = float.MaxValue;
+
+            // Sample to find actual plains and ocean positions
+            for (int dx = -sampleRadius; dx <= sampleRadius; dx += 8)
+            {
+                for (int dz = -sampleRadius; dz <= sampleRadius; dz += 8)
+                {
+                    int checkX = worldX + dx;
+                    int checkZ = worldZ + dz;
+                    BiomeType checkBiome = GetBaseBiomeTypeAt(new Vector3(checkX, 0, checkZ));
+                    float dist = Mathf.Sqrt(dx * dx + dz * dz);
+
+                    if (checkBiome == BiomeType.Plains && dist < minPlainsDist)
+                    {
+                        minPlainsDist = dist;
+                        nearestPlains = new Vector2Int(checkX, checkZ);
+                    }
+                    else if (checkBiome == BiomeType.Ocean && dist < minOceanDist)
+                    {
+                        minOceanDist = dist;
+                        nearestOcean = new Vector2Int(checkX, checkZ);
+                    }
+                }
+            }
+
+            // Get ACTUAL terrain heights from the nearest plains and ocean
+            float plainsHeight = 100f; // Default fallback
+            float oceanHeight = 40f;   // Default fallback
+
+            if (minPlainsDist < float.MaxValue)
+            {
+                // Calculate actual plains terrain height at nearest plains position
+                BiomeData plainsBiome = BiomeRegistry.GetBiome(BiomeType.Plains);
+                float pBaseNoise = Mathf.PerlinNoise(nearestPlains.x * plainsBiome.terrainScale + seedOffset,
+                                                      nearestPlains.y * plainsBiome.terrainScale + seedOffset);
+                float pHillNoise = Mathf.PerlinNoise(nearestPlains.x * plainsBiome.terrainScale * 2f + seedOffset * 1.7f,
+                                                      nearestPlains.y * plainsBiome.terrainScale * 2f + seedOffset * 1.7f);
+                float pHillMult = pHillNoise > plainsBiome.hillThreshold ?
+                    Mathf.Pow((pHillNoise - plainsBiome.hillThreshold) / (1f - plainsBiome.hillThreshold), 1.2f) * plainsBiome.hillMultiplier : 0f;
+                plainsHeight = plainsBiome.baseElevation + pBaseNoise * plainsBiome.terrainAmplitude +
+                              pHillMult * (plainsBiome.terrainAmplitude * 0.5f);
+            }
+
+            if (minOceanDist < float.MaxValue)
+            {
+                // Calculate actual ocean terrain height at nearest ocean position
+                BiomeData oceanBiome = BiomeRegistry.GetBiome(BiomeType.Ocean);
+                float oBaseNoise = Mathf.PerlinNoise(nearestOcean.x * oceanBiome.terrainScale + seedOffset,
+                                                      nearestOcean.y * oceanBiome.terrainScale + seedOffset);
+                oceanHeight = oceanBiome.baseElevation + oBaseNoise * oceanBiome.terrainAmplitude;
+                oceanHeight = Mathf.Max(oceanBiome.waterLevel - oceanBiome.maxDepth, oceanHeight);
+            }
+
+            // Calculate blend factor based on distance (0 = ocean, 1 = plains)
+            float totalDist = minPlainsDist + minOceanDist;
+            float blendFactor = totalDist > 0 ? minPlainsDist / totalDist : 0.5f;
+
+            // Create smooth diagonal slope by interpolating between actual heights
+            float blendedHeight = Mathf.Lerp(oceanHeight, plainsHeight, blendFactor);
+
+            // Add subtle beach texture noise
+            float beachNoise = Mathf.PerlinNoise(worldX * 0.02f + seedOffset, worldZ * 0.02f + seedOffset) * 2f;
+            blendedHeight += beachNoise;
+
+            return Mathf.RoundToInt(blendedHeight);
         }
 
         // Combine using biome-specific base elevation and amplitude
@@ -1756,7 +1878,10 @@ public class WorldGenerator : MonoBehaviour
         return GetBiomeTypeAt(worldPos).ToString();
     }
 
-    public BiomeType GetBiomeTypeAt(Vector3 worldPos)
+    /// <summary>
+    /// Determines base biome type without considering transitions
+    /// </summary>
+    private BiomeType GetBaseBiomeTypeAt(Vector3 worldPos)
     {
         // Use biome noise to determine biome type
         float biomeX = worldPos.x * 0.002f + (worldSeed * 0.01f);
@@ -1773,6 +1898,86 @@ public class WorldGenerator : MonoBehaviour
         return BiomeType.Plains;
     }
 
+    /// <summary>
+    /// Gets biome type with beach transition detection
+    /// </summary>
+    public BiomeType GetBiomeTypeAt(Vector3 worldPos)
+    {
+        BiomeType baseBiome = GetBaseBiomeTypeAt(worldPos);
+
+        // Check for beach transition zones between Ocean and Plains
+        if (baseBiome == BiomeType.Ocean || baseBiome == BiomeType.Plains)
+        {
+            // Sample surrounding area to detect biome boundaries
+            int checkRadius = 48; // Extended to 48 blocks for very wide, smooth beaches
+            bool hasOcean = false;
+            bool hasPlains = false;
+
+            // Sample in a cross pattern for performance
+            for (int i = -checkRadius; i <= checkRadius; i += 4)
+            {
+                BiomeType checkType1 = GetBaseBiomeTypeAt(worldPos + new Vector3(i, 0, 0));
+                BiomeType checkType2 = GetBaseBiomeTypeAt(worldPos + new Vector3(0, 0, i));
+
+                if (checkType1 == BiomeType.Ocean || checkType2 == BiomeType.Ocean) hasOcean = true;
+                if (checkType1 == BiomeType.Plains || checkType2 == BiomeType.Plains) hasPlains = true;
+
+                // Early exit if we found both biomes
+                if (hasOcean && hasPlains) break;
+            }
+
+            // If we're in a zone where both biomes are nearby, this is a beach
+            if (hasOcean && hasPlains)
+            {
+                return BiomeType.Beach;
+            }
+        }
+
+        return baseBiome;
+    }
+
+    /// <summary>
+    /// Calculates blend factor for beach transitions (0 = pure ocean, 1 = pure plains)
+    /// Used to create smooth diagonal slopes from plains to ocean
+    /// </summary>
+    private float GetBeachBlendFactor(Vector3 worldPos)
+    {
+        int sampleRadius = 40; // Sample area to find ocean/plains distance
+        float minOceanDist = float.MaxValue;
+        float minPlainsDist = float.MaxValue;
+
+        // Sample in a grid pattern to find nearest ocean and plains
+        for (int dx = -sampleRadius; dx <= sampleRadius; dx += 8)
+        {
+            for (int dz = -sampleRadius; dz <= sampleRadius; dz += 8)
+            {
+                Vector3 samplePos = worldPos + new Vector3(dx, 0, dz);
+                BiomeType sampleBiome = GetBaseBiomeTypeAt(samplePos);
+                float dist = Mathf.Sqrt(dx * dx + dz * dz);
+
+                if (sampleBiome == BiomeType.Ocean && dist < minOceanDist)
+                    minOceanDist = dist;
+                if (sampleBiome == BiomeType.Plains && dist < minPlainsDist)
+                    minPlainsDist = dist;
+            }
+        }
+
+        // Calculate blend: 0 = near ocean, 1 = near plains
+        if (minOceanDist == float.MaxValue || minPlainsDist == float.MaxValue)
+            return 0.5f; // Default middle if we can't find both
+
+        float totalDist = minOceanDist + minPlainsDist;
+        return totalDist > 0 ? minPlainsDist / totalDist : 0.5f;
+    }
+
+    /// <summary>
+    /// Checks if a position is on or near a biome transition (useful for spawn points)
+    /// </summary>
+    public bool IsOnBiomeTransition(Vector3 worldPos)
+    {
+        return GetBiomeTypeAt(worldPos) == BiomeType.Beach;
+    }
+
     public BiomeData GetBiomeDataAt(Vector3 worldPos)
     {
         BiomeData biome = BiomeRegistry.GetBiome(GetBiomeTypeAt(worldPos));
@@ -1782,6 +1987,11 @@ public class WorldGenerator : MonoBehaviour
         {
             biome.waterLevel = seaLevel;
             biome.maxDepth = maxOceanDepth;
+        }
+        else if (biome.type == BiomeType.Beach)
+        {
+            // Beach uses same sea level as ocean for water generation
+            biome.waterLevel = seaLevel;
         }
 
         return biome;
@@ -3826,6 +4036,92 @@ public class WorldGenerator : MonoBehaviour
         if (wasActive) playerGO.SetActive(true);
     }
 
+    /// <summary>
+    /// Finds a beach biome spawn point for debug testing
+    /// Returns the world position of a suitable beach spawn location
+    /// GUARANTEED to find a beach by using comprehensive search pattern
+    /// </summary>
+    public Vector3? FindBeachSpawnPoint()
+    {
+        Debug.Log($"🏖️ DEBUG: Searching for beach spawn point within {debugBeachSearchRadius} chunks...");
+
+        int maxDistance = debugBeachSearchRadius * chunkSizeX;
+        List<Vector3> beachCandidates = new List<Vector3>();
+
+        // PHASE 1: Spiral search from center - find ALL beaches in range
+        for (int radius = 8; radius < maxDistance; radius += 8)
+        {
+            // Check points in a circle pattern at this radius
+            for (int angle = 0; angle < 360; angle += 10) // Check every 10 degrees for denser coverage
+            {
+                float rad = angle * Mathf.Deg2Rad;
+                int x = Mathf.RoundToInt(radius * Mathf.Cos(rad));
+                int z = Mathf.RoundToInt(radius * Mathf.Sin(rad));
+
+                Vector3 checkPos = new Vector3(x, 0, z);
+                BiomeType biomeType = GetBiomeTypeAt(checkPos);
+
+                if (biomeType == BiomeType.Beach)
+                {
+                    beachCandidates.Add(checkPos);
+                }
+            }
+
+            // If we found beaches, stop expanding search
+            if (beachCandidates.Count > 5)
+                break;
+        }
+
+        // PHASE 2: If no beaches found in spiral, do grid search (guaranteed to find)
+        if (beachCandidates.Count == 0)
+        {
+            Debug.Log("🔍 No beaches in spiral search, doing comprehensive grid scan...");
+
+            for (int x = -maxDistance; x < maxDistance; x += 16)
+            {
+                for (int z = -maxDistance; z < maxDistance; z += 16)
+                {
+                    Vector3 checkPos = new Vector3(x, 0, z);
+                    BiomeType biomeType = GetBiomeTypeAt(checkPos);
+
+                    if (biomeType == BiomeType.Beach)
+                    {
+                        beachCandidates.Add(checkPos);
+                    }
+                }
+            }
+        }
+
+        // PHASE 3: Select best beach candidate (closest to center)
+        if (beachCandidates.Count > 0)
+        {
+            // Find the beach closest to spawn
+            Vector3 bestBeach = beachCandidates[0];
+            float minDist = bestBeach.magnitude;
+
+            foreach (var candidate in beachCandidates)
+            {
+                float dist = candidate.magnitude;
+                if (dist < minDist)
+                {
+                    minDist = dist;
+                    bestBeach = candidate;
+                }
+            }
+
+            // Get surface height and spawn above it
+            int surfaceY = GetColumnTopY((int)bestBeach.x, (int)bestBeach.z);
+            int spawnY = Mathf.Max(surfaceY + 2, seaLevel + 2);
+
+            Vector3 spawnPos = new Vector3(bestBeach.x, spawnY, bestBeach.z);
+            Debug.Log($"✅ Found beach spawn at {spawnPos} (distance: {minDist:F1}, candidates: {beachCandidates.Count})");
+            return spawnPos;
+        }
+
+        Debug.LogError($"❌ CRITICAL: Could not find ANY beach within {debugBeachSearchRadius} chunks! Ocean coverage might be 0 or too low.");
+        return null;
+    }
+
     private int FindHighestSolidYAt(int x, int z)
     {
         for (int y = worldHeight - 1; y >= 0; y--)
@@ -4072,6 +4368,27 @@ public class WorldGenerator : MonoBehaviour
         if (useChunkStreaming)
         {
             Debug.Log($"WorldGenerator: Starting chunk streaming for world '{worldName}' with seed {worldSeed}");
+
+            // Debug: Spawn on beach if requested
+            // debugAlwaysTeleportToBeach = teleport on EVERY load (even reloads)
+            // debugSpawnOnBeach = teleport only on first spawn (not on reloads)
+            bool shouldTeleportToBeach = debugAlwaysTeleportToBeach || debugSpawnOnBeach;
+
+            if (shouldTeleportToBeach && player != null)
+            {
+                Vector3? beachSpawn = FindBeachSpawnPoint();
+                if (beachSpawn.HasValue)
+                {
+                    player.position = beachSpawn.Value;
+                    string mode = debugAlwaysTeleportToBeach ? "ALWAYS TELEPORT" : "FIRST SPAWN";
+                    Debug.Log($"🏖️ DEBUG ({mode}): Player teleported to beach at {beachSpawn.Value}");
+                }
+                else
+                {
+                    Debug.LogWarning("⚠️ DEBUG: Failed to find beach spawn point - check ocean coverage setting!");
+                }
+            }
+
             UpdateStreaming(force: true);
         }
     }

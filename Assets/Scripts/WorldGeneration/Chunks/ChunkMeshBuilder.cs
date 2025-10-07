@@ -59,15 +59,17 @@ namespace WorldGeneration.Chunks
                 if (neighborBlock == BlockType.Sand)
                     return false;
 
-                // ALWAYS render top faces (+Y direction) regardless of what's above
-                // This is crucial for sloped water surfaces to display correctly
-                if (faceDirection == 2) // +Y is index 2
-                    return true;
-
                 // Don't render water faces against leaves to prevent visual overlap
                 // (Both water and leaves are semi-transparent)
                 if (neighborBlock == BlockType.Leaves)
                     return false;
+
+                // Top face (+Y direction): only render if neighbor is NOT water
+                // This ensures only the topmost water surface is rendered
+                if (faceDirection == 2) // +Y is index 2
+                {
+                    return neighborBlock != BlockType.Water;
+                }
 
                 // Always render faces against other non-water blocks
                 if (neighborBlock != BlockType.Water)
@@ -357,9 +359,22 @@ namespace WorldGeneration.Chunks
                                     Vector3Int waterPos = currentWorldPos;
                                     byte centerLevel = waterFlow.GetWaterLevel(waterPos);
 
-                                    // Minecraft water height formula: full height at level 0, decreasing by 1/9th per level
-                                    float centerHeight = 1f - (centerLevel / 9f);
+                                    // Minecraft water height formula: full height at level 0, decreasing by 1/8th per level
+                                    float centerHeight = 1f - (centerLevel / 8f);
 
+                                    // CRITICAL: For still water (level 0 = source blocks), use flat surface
+                                    // Only flowing water (level > 0) should have diagonal corner averaging
+                                    if (centerLevel == 0)
+                                    {
+                                        // Still water - perfectly flat at full height
+                                        adjustedVerts[0] = basePos + new Vector3(f[0].x, 1f, f[0].z);
+                                        adjustedVerts[1] = basePos + new Vector3(f[1].x, 1f, f[1].z);
+                                        adjustedVerts[2] = basePos + new Vector3(f[2].x, 1f, f[2].z);
+                                        adjustedVerts[3] = basePos + new Vector3(f[3].x, 1f, f[3].z);
+                                    }
+                                    else
+                                    {
+                                    // Flowing water - calculate diagonal corner heights
                                     // Get heights of the 4 corners based on neighbor levels
                                     // Corner 0: (0, 1, 1) - southwest top
                                     // Corner 1: (1, 1, 1) - southeast top
@@ -390,47 +405,65 @@ namespace WorldGeneration.Chunks
                                             waterPos + offset                            // Diagonal
                                         };
 
-                                        float totalHeight = 0f;
-                                        int validCount = 0;
-                                        bool hasAir = false;
-
-                                        // Check all 4 blocks at this corner
+                                        // CRITICAL: If ANY block at this corner is a source (level 0), corner is FULL HEIGHT
+                                        // This prevents seams between ocean chunks and flowing water
+                                        bool cornerHasSource = false;
                                         foreach (var blockPos in blocksAtCorner)
                                         {
-                                            BlockType blockType = world.GetBlockType(blockPos);
-
-                                            if (blockType == BlockType.Water)
+                                            if (world.GetBlockType(blockPos) == BlockType.Water && waterFlow.GetWaterLevel(blockPos) == 0)
                                             {
-                                                byte level = waterFlow.GetWaterLevel(blockPos);
-                                                float height = 1f - (level / 9f);
-                                                totalHeight += height;
-                                                validCount++;
+                                                cornerHasSource = true;
+                                                break;
                                             }
-                                            else if (blockType == BlockType.Air)
-                                            {
-                                                // Air contributes height 0
-                                                hasAir = true;
-                                                totalHeight += 0f;
-                                                validCount++;
-                                            }
-                                            // Solid blocks don't contribute to corner height
                                         }
 
-                                        // Average the heights of all contributing blocks
-                                        if (validCount > 0)
+                                        if (cornerHasSource)
                                         {
-                                            cornerHeights[i] = totalHeight / validCount;
-
-                                            // If there's air at this corner, slightly lower it for better visual flow
-                                            if (hasAir)
-                                            {
-                                                cornerHeights[i] *= 0.9f;
-                                            }
+                                            // Any source block at corner = full height (no seams)
+                                            cornerHeights[i] = 1.0f;
                                         }
                                         else
                                         {
-                                            // No valid blocks, use center height
-                                            cornerHeights[i] = centerHeight;
+                                            // Only flowing water - calculate averaged corner height
+                                            float totalHeight = 0f;
+                                            int validCount = 0;
+                                            bool hasAir = false;
+                                            int waterCount = 0;
+
+                                            foreach (var blockPos in blocksAtCorner)
+                                            {
+                                                BlockType blockType = world.GetBlockType(blockPos);
+
+                                                if (blockType == BlockType.Water)
+                                                {
+                                                    byte level = waterFlow.GetWaterLevel(blockPos);
+                                                    float height = 1f - (level / 8f);
+                                                    totalHeight += height;
+                                                    validCount++;
+                                                    waterCount++;
+                                                }
+                                                else if (blockType == BlockType.Air)
+                                                {
+                                                    hasAir = true;
+                                                    totalHeight += 0f;
+                                                    validCount++;
+                                                }
+                                            }
+
+                                            if (validCount > 0)
+                                            {
+                                                cornerHeights[i] = totalHeight / validCount;
+
+                                                // Apply slight lowering for flowing water visual
+                                                if (hasAir && waterCount >= 2 && centerLevel > 0)
+                                                {
+                                                    cornerHeights[i] *= 0.95f;
+                                                }
+                                            }
+                                            else
+                                            {
+                                                cornerHeights[i] = centerHeight;
+                                            }
                                         }
                                     }
 
@@ -440,10 +473,32 @@ namespace WorldGeneration.Chunks
                                     adjustedVerts[1] = basePos + new Vector3(f[1].x, cornerHeights[1], f[1].z);
                                     adjustedVerts[2] = basePos + new Vector3(f[2].x, cornerHeights[2], f[2].z);
                                     adjustedVerts[3] = basePos + new Vector3(f[3].x, cornerHeights[3], f[3].z);
+                                    } // End flowing water block
                                 }
                                 else if (isSideFace && waterFlow != null)
                                 {
-                                    // Side faces - adjust top vertices to match water surface slopes
+                                    // Check if this is still water (level 0)
+                                    byte waterLevel = waterFlow.GetWaterLevel(currentWorldPos);
+
+                                    if (waterLevel == 0)
+                                    {
+                                        // Still water - use flat top vertices at full height
+                                        for (int i = 0; i < 4; i++)
+                                        {
+                                            Vector3 vert = f[i];
+                                            if (vert.y == 1f)
+                                            {
+                                                adjustedVerts[i] = basePos + new Vector3(vert.x, 1f, vert.z);
+                                            }
+                                            else
+                                            {
+                                                adjustedVerts[i] = basePos + vert;
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                    // Flowing water - Side faces adjust top vertices to match water surface slopes
                                     // Side face vertices: [bottom-left, top-left, top-right, bottom-right]
                                     // Top vertices (index 1 and 2) need height adjustment
 
@@ -467,43 +522,65 @@ namespace WorldGeneration.Chunks
                                                 currentWorldPos + new Vector3Int(xOff, 0, zOff)      // Diagonal
                                             };
 
-                                            float totalHeight = 0f;
-                                            int validCount = 0;
-                                            bool hasAir = false;
-
-                                            // Check all 4 blocks at this corner
+                                            // CRITICAL: If ANY block at this corner is a source (level 0), corner is FULL HEIGHT
+                                            bool cornerHasSource = false;
                                             foreach (var blockPos in blocksAtCorner)
                                             {
-                                                BlockType blockType = world.GetBlockType(blockPos);
-
-                                                if (blockType == BlockType.Water)
+                                                if (world.GetBlockType(blockPos) == BlockType.Water && waterFlow.GetWaterLevel(blockPos) == 0)
                                                 {
-                                                    byte level = waterFlow.GetWaterLevel(blockPos);
-                                                    float height = 1f - (level / 9f);
-                                                    totalHeight += height;
-                                                    validCount++;
-                                                }
-                                                else if (blockType == BlockType.Air)
-                                                {
-                                                    hasAir = true;
-                                                    totalHeight += 0f;
-                                                    validCount++;
+                                                    cornerHasSource = true;
+                                                    break;
                                                 }
                                             }
 
                                             float cornerHeight;
-                                            if (validCount > 0)
+                                            if (cornerHasSource)
                                             {
-                                                cornerHeight = totalHeight / validCount;
-                                                if (hasAir)
-                                                {
-                                                    cornerHeight *= 0.9f;
-                                                }
+                                                // Any source block at corner = full height (no seams)
+                                                cornerHeight = 1.0f;
                                             }
                                             else
                                             {
-                                                byte currentLevel = waterFlow.GetWaterLevel(currentWorldPos);
-                                                cornerHeight = 1f - (currentLevel / 9f);
+                                                // Only flowing water - calculate averaged corner height
+                                                float totalHeight = 0f;
+                                                int validCount = 0;
+                                                bool hasAir = false;
+                                                int waterCount = 0;
+
+                                                foreach (var blockPos in blocksAtCorner)
+                                                {
+                                                    BlockType blockType = world.GetBlockType(blockPos);
+
+                                                    if (blockType == BlockType.Water)
+                                                    {
+                                                        byte level = waterFlow.GetWaterLevel(blockPos);
+                                                        float height = 1f - (level / 8f);
+                                                        totalHeight += height;
+                                                        validCount++;
+                                                        waterCount++;
+                                                    }
+                                                    else if (blockType == BlockType.Air)
+                                                    {
+                                                        hasAir = true;
+                                                        totalHeight += 0f;
+                                                        validCount++;
+                                                    }
+                                                }
+
+                                                if (validCount > 0)
+                                                {
+                                                    cornerHeight = totalHeight / validCount;
+                                                    byte currentLevel = waterFlow.GetWaterLevel(currentWorldPos);
+                                                    if (hasAir && waterCount >= 2 && currentLevel > 0)
+                                                    {
+                                                        cornerHeight *= 0.95f;
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    byte currentLevel = waterFlow.GetWaterLevel(currentWorldPos);
+                                                    cornerHeight = 1f - (currentLevel / 8f);
+                                                }
                                             }
 
                                             adjustedVerts[i] = basePos + new Vector3(vert.x, cornerHeight, vert.z);
@@ -514,6 +591,7 @@ namespace WorldGeneration.Chunks
                                             adjustedVerts[i] = basePos + vert;
                                         }
                                     }
+                                    } // End flowing water side faces
                                 }
                                 else
                                 {

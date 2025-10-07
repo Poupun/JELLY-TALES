@@ -4,6 +4,7 @@ public enum BiomeType
 {
     Plains,
     Ocean,
+    Beach,     // Transition biome between Plains and Ocean
     Forest,    // For future expansion
     Desert,    // For future expansion
     Mountains  // For future expansion
@@ -87,6 +88,27 @@ public static class BiomeRegistry
             enableTrees = false,     // No trees in oceans
             treeDensity = 0f,
             enablePlants = false,    // No land plants in oceans (kelp could be added later)
+            plantDensity = 0f
+        },
+
+        // Beach biome (transition between Plains and Ocean)
+        new BiomeData(BiomeType.Beach, "Beach", new Color(0.95f, 0.9f, 0.6f))
+        {
+            baseElevation = 93,      // At sea level - beaches are mostly flat at water line
+            terrainScale = 0.01f,    // Very smooth, gradual transitions
+            terrainAmplitude = 3f,   // Minimal height variation (1-3 blocks)
+            hillThreshold = 0.7f,    // Very rare hills (mostly flat beaches)
+            hillMultiplier = 0.8f,   // Tiny dunes when they occur
+            waterLevel = 95,         // Sea level matches ocean
+            maxDepth = 10,           // Shallow near shore
+            generateUnderwater = false,
+            surfaceBlock = BlockType.Sand,  // Sandy beach surface
+            subSurfaceBlock = BlockType.Sand, // Sand all the way down
+            deepBlock = BlockType.Stone,
+            fluidBlock = BlockType.Water,    // Water can appear on beaches
+            enableTrees = false,     // No trees on beaches (could add palm trees later)
+            treeDensity = 0f,
+            enablePlants = false,    // No grass plants on sand
             plantDensity = 0f
         }
     };

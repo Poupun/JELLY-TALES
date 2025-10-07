@@ -160,7 +160,7 @@ Shader "Custom/WaterWaves"
                 shouldAnimate = saturate(shouldAnimate); // Clamp to 0-1
 
                 pos.xz += dir * totalWave * 0.3 * shouldAnimate; // Horizontal wave movement
-                // pos.y disabled - vertical movement causes culling with sloped water surfaces
+                pos.y += totalWave * _WindVertical * shouldAnimate; // Vertical wave movement (now safe with proper culling)
 
                 // Transform to world and clip space
                 float3 ws = TransformObjectToWorld(pos);

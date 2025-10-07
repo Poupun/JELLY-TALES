@@ -56,5 +56,5 @@
         "temp/": true,
         "Temp/": true
     },
-    "dotnet.defaultSolution": "JELLY-TALES.sln"
+    "dotnet.defaultSolution": "FISCHER-CRAFT.sln"
 }
