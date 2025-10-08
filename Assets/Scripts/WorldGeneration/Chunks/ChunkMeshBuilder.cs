@@ -40,6 +40,19 @@ namespace WorldGeneration.Chunks
             new Vector2(0,0), new Vector2(0,1), new Vector2(1,1), new Vector2(1,0)
         };
 
+        private static WaterFlowSystem _cachedWaterFlowSystem;
+        private static WorldGenerator _cachedWaterWorld;
+
+        private static WaterFlowSystem GetWaterFlowSystem(WorldGenerator world)
+        {
+            if (world == null) return null;
+            if (_cachedWaterWorld == world && _cachedWaterFlowSystem != null) return _cachedWaterFlowSystem;
+
+            world.TryGetComponent(out WaterFlowSystem flowSystem);
+            _cachedWaterWorld = world;
+            _cachedWaterFlowSystem = flowSystem;
+            return flowSystem;
+        }
 
         private static bool ShouldRenderFace(BlockType currentBlock, BlockType neighborBlock, int faceDirection, WorldGenerator world,
             Vector3Int currentPos = default, Vector3Int neighborPos = default)
@@ -55,15 +68,6 @@ namespace WorldGeneration.Chunks
                 if (faceDirection == 3) // -Y is index 3
                     return false;
 
-                // Don't render water faces against sand to prevent Z-fighting
-                if (neighborBlock == BlockType.Sand)
-                    return false;
-
-                // Don't render water faces against leaves to prevent visual overlap
-                // (Both water and leaves are semi-transparent)
-                if (neighborBlock == BlockType.Leaves)
-                    return false;
-
                 // Top face (+Y direction): only render if neighbor is NOT water
                 // This ensures only the topmost water surface is rendered
                 if (faceDirection == 2) // +Y is index 2
@@ -71,13 +75,41 @@ namespace WorldGeneration.Chunks
                     return neighborBlock != BlockType.Water;
                 }
 
-                // Always render faces against other non-water blocks
-                if (neighborBlock != BlockType.Water)
-                    return true;
+                // Fetch flow system once (cached per-world)
+                var waterFlow = GetWaterFlowSystem(world);
+                byte currentLevel = 0;
+                bool hasFlowInfo = false;
+                if (waterFlow != null && currentPos.y >= 0 && currentPos.y < world.worldHeight)
+                {
+                    currentLevel = waterFlow.GetWaterLevel(currentPos);
+                    hasFlowInfo = true;
+                }
 
-                // Don't render water-to-water interior faces (reduces overdraw)
-                // The sloped top faces handle the visual flow representation
-                return false;
+                // For side faces (horizontal directions), we need to handle still vs flowing water differently
+                bool isHorizontalFace = (faceDirection == 0 || faceDirection == 1 || faceDirection == 4 || faceDirection == 5);
+                bool isFlowing = hasFlowInfo && currentLevel > 0;
+
+                // For water-to-water faces
+                if (neighborBlock == BlockType.Water)
+                {
+                    // Still water (level 0) should never show faces to other water blocks
+                    if (!isFlowing)
+                        return false;
+
+                    // Flowing water: only render if neighbor is shallower (to show waterfalls)
+                    if (!hasFlowInfo) return false;
+
+                    if (neighborPos.y >= 0 && neighborPos.y < world.worldHeight)
+                    {
+                        byte neighborLevel = waterFlow.GetWaterLevel(neighborPos);
+                        return neighborLevel > currentLevel;
+                    }
+                    return false;
+                }
+
+                // For water-to-air faces (chunk boundaries, water edges)
+                // Still water SHOULD render side faces against air to show ocean edges properly
+                return true;
             }
 
             // For solid blocks: always render faces against water (for underwater visibility)
@@ -310,7 +342,26 @@ namespace WorldGeneration.Chunks
                             {
                                 if (neighborWorldY >= 0 && neighborWorldY < world.worldHeight)
                                 {
-                                    neighbor = world.GetBlockType(neighborWorldPos);
+                                    // Check if the neighboring chunk is loaded before querying
+                                    bool neighborChunkLoaded = world.IsChunkLoadedAt(neighborWorldPos);
+
+                                    if (neighborChunkLoaded)
+                                    {
+                                        neighbor = world.GetBlockType(neighborWorldPos);
+                                    }
+                                    else
+                                    {
+                                        // Neighboring chunk not loaded yet - make intelligent guess
+                                        // If current block is water at/below sea level, assume neighbor is also water
+                                        if (t == BlockType.Water && currentWorldY <= world.seaLevel)
+                                        {
+                                            neighbor = BlockType.Water; // Assume ocean continues
+                                        }
+                                        else
+                                        {
+                                            neighbor = BlockType.Air; // Default fallback
+                                        }
+                                    }
                                 }
                             }
 
@@ -634,7 +685,10 @@ namespace WorldGeneration.Chunks
                             // --- Fake face lighting + subtle per-block variation ---
                             // Minecraft-like depth: darken certain faces & bottom, lighten top.
                             float shade = 1f;
-                            if (world != null && world.enableFaceShading)
+
+                            // Water blocks should have uniform lighting (no face shading or variation)
+                            // to avoid dark patches on ocean surface
+                            if (t != BlockType.Water && world != null && world.enableFaceShading)
                             {
                                 // Direction order matches Directions array
                                 switch (d)
@@ -669,8 +723,8 @@ namespace WorldGeneration.Chunks
                                 var waterFlow = world?.GetComponent<WaterFlowSystem>();
                                 byte waterLevel = waterFlow != null ? waterFlow.GetWaterLevel(currentWorldPos) : (byte)0;
                                 float levelNormalized = waterLevel / 7f; // Normalize to 0-1 range
-                                // Store level in red, keep shading in green/blue for lighting
-                                c = new Color(levelNormalized, shade, shade, 1f);
+                                // Water uses uniform lighting (shade = 1.0) to avoid dark patches
+                                c = new Color(levelNormalized, 1f, 1f, 1f);
                             }
                             else
                             {

@@ -101,12 +101,33 @@ namespace WorldGeneration.Chunks
             // Pre-calculate neighbor blocks to reduce world lookups
             var neighborCache = new Dictionary<Vector3Int, BlockType>();
 
-            BlockType GetBlockCached(Vector3Int worldPos)
+            BlockType GetBlockCached(Vector3Int worldPos, BlockType currentBlock = BlockType.Air)
             {
                 if (neighborCache.TryGetValue(worldPos, out BlockType cached))
                     return cached;
 
-                BlockType block = world.GetBlockType(worldPos);
+                // Check if neighboring chunk is loaded before querying
+                bool neighborChunkLoaded = world.IsChunkLoadedAt(worldPos);
+
+                BlockType block;
+                if (neighborChunkLoaded)
+                {
+                    block = world.GetBlockType(worldPos);
+                }
+                else
+                {
+                    // Neighboring chunk not loaded - make intelligent guess
+                    // If current block is water at/below sea level, assume neighbor is also water
+                    if (currentBlock == BlockType.Water && worldPos.y <= world.seaLevel)
+                    {
+                        block = BlockType.Water; // Assume ocean continues
+                    }
+                    else
+                    {
+                        block = BlockType.Air; // Default fallback
+                    }
+                }
+
                 neighborCache[worldPos] = block;
                 return block;
             }
@@ -148,11 +169,11 @@ namespace WorldGeneration.Chunks
                             }
                             else if (neighborWorldPos.y >= 0 && neighborWorldPos.y < world.worldHeight)
                             {
-                                neighbor = GetBlockCached(neighborWorldPos);
+                                neighbor = GetBlockCached(neighborWorldPos, blockType);
                             }
 
                             // Optimized face culling
-                            if (!ShouldRenderFace(blockType, neighbor, d, world))
+                            if (!ShouldRenderFace(blockType, neighbor, d, world, waterCache, currentWorldPos, neighborWorldPos))
                                 continue;
 
                             var f = FaceVerts[d];
@@ -436,17 +457,55 @@ namespace WorldGeneration.Chunks
             colors.Add(c); colors.Add(c); colors.Add(c); colors.Add(c);
         }
 
-        private static bool ShouldRenderFace(BlockType currentBlock, BlockType neighborBlock, int faceDirection, WorldGenerator world)
+        private static bool ShouldRenderFace(
+            BlockType currentBlock,
+            BlockType neighborBlock,
+            int faceDirection,
+            WorldGenerator world,
+            WaterCache waterCache,
+            Vector3Int currentWorldPos,
+            Vector3Int neighborWorldPos)
         {
-            if (neighborBlock == BlockType.Air) return true;
+            if (neighborBlock == BlockType.Air && currentBlock != BlockType.Water)
+                return true;
 
             if (currentBlock == BlockType.Water)
             {
                 if (faceDirection == 3) return false; // -Y
-                if (neighborBlock == BlockType.Sand || neighborBlock == BlockType.Leaves) return false;
-                if (faceDirection == 2) return neighborBlock != BlockType.Water; // +Y
-                if (neighborBlock != BlockType.Water) return true;
-                return false;
+
+                if (faceDirection == 2)
+                    return neighborBlock != BlockType.Water; // top surface only if above isn't water
+
+                byte currentLevel = 0;
+                bool hasFlowInfo = false;
+                if (waterCache?.flowSystem != null && currentWorldPos.y >= 0 && currentWorldPos.y < world.worldHeight)
+                {
+                    currentLevel = waterCache.GetWaterLevel(currentWorldPos);
+                    hasFlowInfo = true;
+                }
+
+                bool isFlowing = hasFlowInfo && currentLevel > 0;
+
+                // For water-to-water faces
+                if (neighborBlock == BlockType.Water)
+                {
+                    // Still water (level 0) should never show faces to other water blocks
+                    if (!isFlowing)
+                        return false;
+
+                    // Flowing water: only render if neighbor is shallower (to show waterfalls)
+                    if (!hasFlowInfo) return false;
+                    if (neighborWorldPos.y >= 0 && neighborWorldPos.y < world.worldHeight)
+                    {
+                        byte neighborLevel = waterCache.GetWaterLevel(neighborWorldPos);
+                        return neighborLevel > currentLevel;
+                    }
+                    return false;
+                }
+
+                // For water-to-air faces (chunk boundaries, water edges)
+                // Still water SHOULD render side faces against air to show ocean edges properly
+                return true;
             }
 
             if (neighborBlock == BlockType.Water) return true;

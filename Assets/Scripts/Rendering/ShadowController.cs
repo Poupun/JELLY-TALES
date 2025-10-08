@@ -12,10 +12,10 @@ using UnityEngine.Rendering;
 public class ShadowController : MonoBehaviour
 {
     [Header("Targets")]
-    [Tooltip("If true, applies to all active Directional Lights. If false, uses Target Light only.")]
+    [Tooltip("If sstrue, applies to all active Directional Lights. If false, uses Target Light only.")]
     public bool controlAllDirectionalLights = true;
 
-    [Tooltip("Directional Light to control when 'controlAllDirectionalLights' is false.")]
+    [Tooltip("Directional sLight to control when 'controlAllDirectionalLights' is false.")]
     public Light targetLight;
 
     [Header("Shadow Intensity")]

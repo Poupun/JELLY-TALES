@@ -2106,12 +2106,20 @@ MonoBehaviour:
   northSouthShade: 0.85
   bottomShade: 0.7
   variationStrength: 0.143
-  oceanCoverage: 0.451
-  seaLevel: 95
+  oceanCoverage: 1
+  seaLevel: 104
   maxOceanDepth: 40
-  debugSpawnOnBeach: 1
-  debugAlwaysTeleportToBeach: 1
-  debugBeachSearchRadius: 50
+  debugSpawnOnBeach: 0
+  debugAlwaysTeleportToBeach: 0
+  debugBeachSearchRadius: 8
+  coastalSandStart: 0.4
+  coastalSandBlendStrength: 0.652
+  coastalSlopeExponent: 2.341
+  coastalHeightVariance: 3
+  coastalSandDepth: 3
+  coastalTransitionWidth: 0.025
+  coastalSandNoiseScale: 0.1757
+  coastalSandNoiseAmplitude: 0.352
   waterTransparency: 1
   enableTrees: 1
   treesPerChunk: 0.14

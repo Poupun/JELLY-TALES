@@ -104,7 +104,27 @@ namespace WorldGeneration.Chunks
 
                                 if (!neighborCache.TryGetValue(neighborPos, out neighbor))
                                 {
-                                    neighbor = world.GetBlockType(neighborPos);
+                                    // Check if neighboring chunk is loaded before querying
+                                    bool neighborChunkLoaded = world.IsChunkLoadedAt(neighborPos);
+
+                                    if (neighborChunkLoaded)
+                                    {
+                                        neighbor = world.GetBlockType(neighborPos);
+                                    }
+                                    else
+                                    {
+                                        // Neighboring chunk not loaded - make intelligent guess
+                                        // If current block is water at/below sea level, assume neighbor is also water
+                                        if (blockType == BlockType.Water && ny <= world.seaLevel)
+                                        {
+                                            neighbor = BlockType.Water; // Assume ocean continues
+                                        }
+                                        else
+                                        {
+                                            neighbor = BlockType.Air; // Default fallback
+                                        }
+                                    }
+
                                     neighborCache[neighborPos] = neighbor;
                                 }
                             }
@@ -150,8 +170,14 @@ namespace WorldGeneration.Chunks
                             reusableUVs.Add(QuadUV[3]);
 
                             // Colors (simplified shading)
+                            // Water blocks get uniform lighting to avoid dark patches
                             float shade = 1f;
-                            if (world.enableFaceShading)
+                            if (isWater)
+                            {
+                                // Water always uses full brightness for uniform ocean appearance
+                                shade = 1f;
+                            }
+                            else if (world.enableFaceShading)
                             {
                                 shade = d == 2 ? 1f : d == 3 ? world.bottomShade :
                                         (d == 0 || d == 1) ? world.eastWestShade : world.northSouthShade;
@@ -259,15 +285,19 @@ namespace WorldGeneration.Chunks
 
         private static bool ShouldRenderFaceFast(BlockType current, BlockType neighbor, int faceDir)
         {
-            if (neighbor == BlockType.Air) return true;
+            if (neighbor == BlockType.Air && current != BlockType.Water) return true;
 
             if (current == BlockType.Water)
             {
-                if (faceDir == 3) return false; // -Y
-                if (neighbor == BlockType.Sand || neighbor == BlockType.Leaves) return false;
-                if (faceDir == 2) return neighbor != BlockType.Water; // +Y
-                if (neighbor != BlockType.Water) return true;
-                return false;
+                if (faceDir == 3) return false; // -Y (bottom face - never render)
+                if (faceDir == 2) return neighbor != BlockType.Water; // +Y (top face - only render if not water above)
+
+                // Side faces (horizontal): render against air (ocean edges), but not against water (avoid interior faces)
+                if (neighbor == BlockType.Water)
+                    return false; // Water-to-water side faces should be culled
+
+                // Water-to-air side faces should render (to show ocean edges at chunk boundaries)
+                return neighbor == BlockType.Air;
             }
 
             if (neighbor == BlockType.Water) return true;
