@@ -68,6 +68,15 @@ namespace WorldGeneration.Chunks
 		public void SetLocal(int lx, int ly, int lz, BlockType t)
 		{
 			if (lx < 0 || lx >= sizeX || ly < 0 || ly >= sizeY || lz < 0 || lz >= sizeZ) return;
+
+			// DEBUG: Track when leaves are being replaced
+			BlockType oldBlock = blocks[lx, ly, lz];
+			if (oldBlock == BlockType.Leaves && t != BlockType.Leaves)
+			{
+				Vector3Int worldPos = new Vector3Int(coord.x * sizeX + lx, ly, coord.y * sizeZ + lz);
+				UnityEngine.Debug.LogError($"Chunk.SetLocal: LEAVES at {worldPos} (local {lx},{ly},{lz}) being replaced with {t}!");
+			}
+
 			blocks[lx, ly, lz] = t;
 		}
 

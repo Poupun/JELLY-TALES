@@ -24,6 +24,7 @@ public class MiningSystem : MonoBehaviour
     
     private Camera playerCamera;
     private WorldGenerator worldGenerator;
+    private PlayerController playerController;
     private bool isMining = false;
     private Vector3Int currentMiningBlock;
     private float miningProgress = 0f;
@@ -49,7 +50,8 @@ public class MiningSystem : MonoBehaviour
             playerCamera = Camera.main;
             
         worldGenerator = FindFirstObjectByType<WorldGenerator>();
-        
+        playerController = GetComponent<PlayerController>();
+
         if (miningAudioSource == null)
             miningAudioSource = GetComponent<AudioSource>();
     }
@@ -109,12 +111,21 @@ public class MiningSystem : MonoBehaviour
                 
                 // Start mining process
                 currentMiningBlock = hitCell;
-                
+
                 // Calculate mining time with tool effectiveness
                 float baseTime = BlockHardnessSystem.GetMiningTime(blockType);
                 float toolMultiplier = ToolEffectivenessSystem.GetMiningSpeedMultiplierForHeldTool(blockType);
                 float totalMultiplier = globalMiningSpeedMultiplier * toolMultiplier;
-                miningTimeRequired = baseTime / totalMultiplier;
+
+                // Instant mining when in noclip mode
+                if (playerController != null && playerController.IsNoclip())
+                {
+                    miningTimeRequired = 0.01f; // Nearly instant (0.01 seconds)
+                }
+                else
+                {
+                    miningTimeRequired = baseTime / totalMultiplier;
+                }
                 miningProgress = 0f;
                 isMining = true;
                 

@@ -528,6 +528,20 @@ RectTransform:
   m_AnchoredPosition: {x: 1113, y: -3}
   m_SizeDelta: {x: 1000, y: 700}
   m_Pivot: {x: 0.5, y: 0.5}
+--- !u!134 &213924753
+PhysicsMaterial:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: ' (Instance) (Instance) (Instance) (Instance) (Instance) (Instance) (Instance)
+    (Instance) (Instance) (Instance)'
+  serializedVersion: 2
+  m_DynamicFriction: 0.6
+  m_StaticFriction: 0.6
+  m_Bounciness: 0
+  m_FrictionCombine: 0
+  m_BounceCombine: 0
 --- !u!1 &422596004 stripped
 GameObject:
   m_CorrespondingSourceObject: {fileID: 7973261085603349039, guid: 9a0b0df0ff12a404abef0bac44e0176b, type: 3}
@@ -1953,6 +1967,7 @@ GameObject:
   - component: {fileID: 884223580}
   - component: {fileID: 884223582}
   - component: {fileID: 884223583}
+  - component: {fileID: 884223584}
   m_Layer: 0
   m_Name: WorldGenerator
   m_TagString: Untagged
@@ -1975,7 +1990,7 @@ MonoBehaviour:
   worldWidth: 16
   worldHeight: 200
   worldDepth: 120
-  worldSeed: 12345
+  worldSeed: -645173321
   enableTunnels: 1
   tunnelSettings:
     enableTunnels: 1
@@ -2054,7 +2069,7 @@ MonoBehaviour:
   chunkSizeZ: 16
   viewDistanceChunks: 8
   player: {fileID: 1426170050}
-  maxChunkLoadsPerFrame: 1
+  maxChunkLoadsPerFrame: 20
   useJobSystem: 0
   targetFrameTime: 16.67
   useChunkMeshing: 1
@@ -2091,6 +2106,21 @@ MonoBehaviour:
   northSouthShade: 0.85
   bottomShade: 0.7
   variationStrength: 0.143
+  oceanCoverage: 1
+  seaLevel: 104
+  maxOceanDepth: 40
+  debugSpawnOnBeach: 0
+  debugAlwaysTeleportToBeach: 0
+  debugBeachSearchRadius: 8
+  coastalSandStart: 0.4
+  coastalSandBlendStrength: 0.652
+  coastalSlopeExponent: 2.341
+  coastalHeightVariance: 3
+  coastalSandDepth: 3
+  coastalTransitionWidth: 0.025
+  coastalSandNoiseScale: 0.1757
+  coastalSandNoiseAmplitude: 0.352
+  waterTransparency: 1
   enableTrees: 1
   treesPerChunk: 0.14
   treeSeedOffset: 98765
@@ -2143,6 +2173,30 @@ MonoBehaviour:
   plantWindScale: 2.38
   plantWindVerticalFactor: 0.2
   plantWindVariation: 0.5
+  enableWaterWaves: 1
+  waterWaveAmplitude: 0.08
+  waterWaveSpeed: 1.5
+  waterWaveScale: 0.8
+  waterWaveDirection: {x: 1, y: 0.3}
+  waterColor: {r: 0.2, g: 0.6, b: 1, a: 1}
+  waterSideOpacity: 1
+  enableWaterDepthFog: 1
+  deepWaterColor: {r: 0.05, g: 0.15, b: 0.3, a: 1}
+  maxWaterDepth: 20
+  depthFogIntensity: 0.535
+  waterAbsorption: 0.482
+  oceanFloorFogColor: {r: 0.02, g: 0.05, b: 0.1, a: 1}
+  oceanFloorFogDistance: 42.4
+  oceanFloorFogIntensity: 0.435
+  enableUnderwaterFog: 1
+  underwaterFogColor: {r: 0, g: 0.10393747, b: 0.3019608, a: 1}
+  underwaterFogDensity: 0.177
+  underwaterVisibilityRange: 53.6
+  swimSpeed: 5
+  swimUpSpeed: 2
+  waterGravityMultiplier: 0.5
+  waterDrag: 8.02
+  waterSinkSpeed: 1.5
   plantWeightFern: 0.23
   plantWeightPlant: 0
   plantWeightGrass: 5
@@ -2201,6 +2255,23 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4de9bfe8089b6214cbf6498ef2380105, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!114 &884223584
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 884223579}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3f16d0019b8692a45b11bf31cceb8652, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  maxFlowDistance: 4
+  waterTickRate: 0.5
+  enableWaterFlow: 1
+  maxBlocksToProcessPerTick: 5
+  meshUpdateInterval: 5
 --- !u!1 &911503234
 GameObject:
   m_ObjectHideFlags: 0
@@ -4247,6 +4318,11 @@ MonoBehaviour:
   mouseSensitivity: 2
   jumpForce: 1.2
   gravityMultiplier: 1.5
+  swimSpeed: 3
+  swimUpSpeed: 4
+  waterGravityMultiplier: 0.3
+  waterDrag: 3
+  waterSinkSpeed: 1
   groundAcceleration: 20
   groundDeceleration: 20
   airAcceleration: 2
@@ -4276,7 +4352,7 @@ CharacterController:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1426170045}
-  m_Material: {fileID: 2101781299}
+  m_Material: {fileID: 213924753}
   m_IncludeLayers:
     serializedVersion: 2
     m_Bits: 0
@@ -4303,7 +4379,7 @@ Transform:
   m_GameObject: {fileID: 1426170045}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 8, y: 10, z: 8}
+  m_LocalPosition: {x: 50, y: 80, z: 50}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -6722,20 +6798,6 @@ RectTransform:
   m_AnchoredPosition: {x: 0, y: 0}
   m_SizeDelta: {x: 100, y: 100}
   m_Pivot: {x: 0.5, y: 0.5}
---- !u!134 &2101781299
-PhysicsMaterial:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_Name: ' (Instance) (Instance) (Instance) (Instance) (Instance) (Instance) (Instance)
-    (Instance)'
-  serializedVersion: 2
-  m_DynamicFriction: 0.6
-  m_StaticFriction: 0.6
-  m_Bounciness: 0
-  m_FrictionCombine: 0
-  m_BounceCombine: 0
 --- !u!1 &2112105359
 GameObject:
   m_ObjectHideFlags: 0

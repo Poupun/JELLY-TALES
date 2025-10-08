@@ -7,6 +7,20 @@ public class PlayerController : MonoBehaviour
     [Tooltip("Gravity multiplier - higher values make you fall faster")]
     [Range(1f, 5f)]
     public float gravityMultiplier = 1.5f;
+
+    [Header("Water Physics (Minecraft-style)")]
+    [Tooltip("Speed when swimming horizontally in water")]
+    public float swimSpeed = 3f;
+    [Tooltip("Speed when swimming up in water (holding space)")]
+    public float swimUpSpeed = 4f;
+    [Tooltip("Gravity in water - slower falling")]
+    [Range(0.1f, 1f)]
+    public float waterGravityMultiplier = 0.3f;
+    [Tooltip("Water drag - resistance when moving")]
+    [Range(0f, 10f)]
+    public float waterDrag = 3f;
+    [Tooltip("How quickly player sinks in water when not swimming up")]
+    public float waterSinkSpeed = 1f;
     
     [Header("Movement Physics - Tweak These!")]
     [Tooltip("How fast the player accelerates to target speed on ground")]
@@ -41,9 +55,13 @@ public class PlayerController : MonoBehaviour
     private CharacterController characterController; private Camera playerCamera; private WorldGenerator worldGenerator; private UnifiedPlayerInventory playerInventory;
 
     // Movement state
-    private Vector3 velocity; 
+    private Vector3 velocity;
     private Vector3 horizontalVelocity; // Separate horizontal velocity for physics-based movement
     private float xRotation = 0f; private bool isSprinting; private bool isCrouching; private float currentSpeed; private float baseFOV; private float targetHeight;
+
+    // Water state
+    private bool isInWater = false;
+    private bool isSwimming = false;
     
     // Noclip state
     private bool isNoclip = false;
@@ -61,6 +79,21 @@ public class PlayerController : MonoBehaviour
         worldGenerator = FindFirstObjectByType<WorldGenerator>(FindObjectsInactive.Exclude);
         playerInventory = GetComponent<UnifiedPlayerInventory>() ?? gameObject.AddComponent<UnifiedPlayerInventory>();
         baseFOV = playerCamera.fieldOfView; targetHeight = standHeight; currentSpeed = walkSpeed; Cursor.lockState = CursorLockMode.Locked;
+
+        // Sync water physics from WorldGenerator
+        SyncWaterPhysicsFromWorldGenerator();
+    }
+
+    void SyncWaterPhysicsFromWorldGenerator()
+    {
+        if (worldGenerator != null)
+        {
+            swimSpeed = worldGenerator.swimSpeed;
+            swimUpSpeed = worldGenerator.swimUpSpeed;
+            waterGravityMultiplier = worldGenerator.waterGravityMultiplier;
+            waterDrag = worldGenerator.waterDrag;
+            waterSinkSpeed = worldGenerator.waterSinkSpeed;
+        }
     }
 
     // Update method moved below to include dropped item hover checking
@@ -96,13 +129,19 @@ public class PlayerController : MonoBehaviour
 
     void HandleMovement()
     {
+        // Check if player is in water
+        CheckWaterState();
+
         float horizontal = Input.GetAxisRaw("Horizontal");
         float vertical = Input.GetAxisRaw("Vertical");
-        
+
         // Calculate input direction in world space
         Vector3 inputDirection = (transform.right * horizontal + transform.forward * vertical).normalized;
-        Vector3 targetVelocity = inputDirection * currentSpeed;
-        
+
+        // Use swim speed in water, regular speed on ground
+        float moveSpeed = isInWater ? swimSpeed : currentSpeed;
+        Vector3 targetVelocity = inputDirection * moveSpeed;
+
         // Physics-based horizontal movement
         bool isGrounded = characterController.isGrounded;
         
@@ -205,17 +244,84 @@ public class PlayerController : MonoBehaviour
             }
         }
         
-        // Vertical movement (gravity and jumping)
-        if (isGrounded && velocity.y < 0) velocity.y = -2f;
-        if (Input.GetButtonDown("Jump") && isGrounded && !isCrouching) 
+        // Vertical movement - WATER PHYSICS or normal gravity
+        if (isInWater)
         {
-            velocity.y = Mathf.Sqrt(jumpForce * -2f * Physics.gravity.y * gravityMultiplier);
+            // MINECRAFT-STYLE WATER PHYSICS
+            // Apply water drag to horizontal velocity
+            horizontalVelocity *= Mathf.Max(0, 1f - waterDrag * Time.deltaTime);
+
+            // Holding space = swim up (like Minecraft)
+            if (Input.GetKey(KeyCode.Space))
+            {
+                velocity.y = swimUpSpeed;
+                isSwimming = true;
+            }
+            else
+            {
+                // Not holding space = slowly sink
+                velocity.y = -waterSinkSpeed;
+                isSwimming = false;
+            }
+
+            // Apply reduced gravity in water
+            velocity.y += Physics.gravity.y * waterGravityMultiplier * Time.deltaTime;
         }
-        velocity.y += Physics.gravity.y * gravityMultiplier * Time.deltaTime;
-        
+        else
+        {
+            // NORMAL GROUND/AIR PHYSICS
+            if (isGrounded && velocity.y < 0) velocity.y = -2f;
+            if (Input.GetButtonDown("Jump") && isGrounded && !isCrouching)
+            {
+                velocity.y = Mathf.Sqrt(jumpForce * -2f * Physics.gravity.y * gravityMultiplier);
+            }
+            velocity.y += Physics.gravity.y * gravityMultiplier * Time.deltaTime;
+        }
+
         // Combine horizontal and vertical movement
         Vector3 finalMovement = horizontalVelocity + Vector3.up * velocity.y;
         characterController.Move(finalMovement * Time.deltaTime);
+    }
+
+    /// <summary>
+    /// Check if player is currently in water (Minecraft-style detection)
+    /// </summary>
+    void CheckWaterState()
+    {
+        if (worldGenerator == null)
+        {
+            isInWater = false;
+            return;
+        }
+
+        // Check player's position for water blocks
+        Vector3 playerPos = transform.position;
+        Vector3Int blockPos = new Vector3Int(
+            Mathf.FloorToInt(playerPos.x),
+            Mathf.FloorToInt(playerPos.y),
+            Mathf.FloorToInt(playerPos.z)
+        );
+
+        // Check if player is in water at their current position
+        BlockType currentBlock = worldGenerator.GetBlockType(blockPos);
+
+        // Also check slightly above feet (for partial submersion)
+        Vector3Int blockPosAbove = new Vector3Int(
+            Mathf.FloorToInt(playerPos.x),
+            Mathf.FloorToInt(playerPos.y + 0.5f),
+            Mathf.FloorToInt(playerPos.z)
+        );
+        BlockType blockAbove = worldGenerator.GetBlockType(blockPosAbove);
+
+        // Player is in water if either position contains water
+        bool wasInWater = isInWater;
+        isInWater = (currentBlock == BlockType.Water || blockAbove == BlockType.Water);
+
+        // Log state changes for debugging
+        if (wasInWater != isInWater)
+        {
+            Debug.Log(isInWater ? "Player entered water!" : "Player exited water!");
+        }
     }
 
     void UpdateCrouchHeight()
@@ -562,21 +668,32 @@ public class PlayerController : MonoBehaviour
         { 
             Debug.Log("PlayerController: Using voxel raycast for block placement");
             Vector3Int hitCell, placeCell; Vector3 hitNormal; 
-            if (worldGenerator.TryVoxelRaycast(ray, interactionRange, out hitCell, out placeCell, out hitNormal)) 
-            { 
-                Vector3Int pos = placeCell; 
-                Debug.Log($"PlayerController: Voxel raycast hit, placing at {pos}");
-                if (characterController){ Bounds bb = new Bounds((Vector3)pos, Vector3.one); if (bb.Intersects(characterController.bounds)) { Debug.Log("PlayerController: Cannot place - intersects player bounds"); return; } } 
-                if (worldGenerator.GetBlockType(pos) == BlockType.Air)
-                { 
+            if (worldGenerator.TryVoxelRaycast(ray, interactionRange, out hitCell, out placeCell, out hitNormal))
+            {
+                Vector3Int pos = placeCell;
+                BlockType hitBlockType = worldGenerator.GetBlockType(hitCell);
+                BlockType placeBlockType = worldGenerator.GetBlockType(pos);
+
+                Debug.Log($"PlayerController: Voxel raycast hit {hitBlockType} at {hitCell}, placing at {pos} (currently {placeBlockType})");
+
+                // Minecraft water logic:
+                // Raycast now passes through water and hits solid blocks
+                // We can place blocks in air OR water (water gets replaced)
+                // hitCell is always a solid block now (raycast skips water)
+
+                if (characterController){ Bounds bb = new Bounds((Vector3)pos, Vector3.one); if (bb.Intersects(characterController.bounds)) { Debug.Log("PlayerController: Cannot place - intersects player bounds"); return; } }
+
+                // Allow placing if position is Air OR Water (water gets replaced)
+                if (placeBlockType == BlockType.Air || placeBlockType == BlockType.Water)
+                {
                     Debug.Log($"PlayerController: Placing {placeType} at {pos}");
-                    worldGenerator.PlaceBlock(pos, placeType); 
-                    playerInventory.ConsumeOneFromSelected(); 
+                    worldGenerator.PlaceBlock(pos, placeType);
+                    playerInventory.ConsumeOneFromSelected();
                     OnBlockPlaced?.Invoke(placeType, pos);
-                } 
+                }
                 else
                 {
-                    Debug.Log($"PlayerController: Cannot place - position occupied by {worldGenerator.GetBlockType(pos)}");
+                    Debug.Log($"PlayerController: Cannot place - position occupied by {placeBlockType}");
                 }
                 return; 
             } 
