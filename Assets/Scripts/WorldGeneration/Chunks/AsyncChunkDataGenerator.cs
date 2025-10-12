@@ -145,20 +145,64 @@ namespace WorldGeneration.Chunks
         {
             float seedOffset = (world.worldSeed % 10000) * 0.01f;
 
-            // Biome noise for ocean/land determination
-            float biomeX = position.x * 0.002f + seedOffset;
-            float biomeZ = position.z * 0.002f + seedOffset;
+            // Use inspector-controlled noise scale for ocean/plains biomes
+            float biomeX = position.x * world.oceanPlainsNoiseScale + seedOffset;
+            float biomeZ = position.z * world.oceanPlainsNoiseScale + seedOffset;
             float biomeNoise = Mathf.PerlinNoise(biomeX, biomeZ);
+
+            // Optional: Add high-frequency noise to break up large biomes
+            if (world.maxBiomeSize > 0)
+            {
+                float detailScale = 1f / Mathf.Max(1f, world.maxBiomeSize * 0.5f);
+                float detailX = position.x * detailScale + seedOffset * 3.14f;
+                float detailZ = position.z * detailScale + seedOffset * 2.71f;
+                float detailNoise = Mathf.PerlinNoise(detailX, detailZ);
+                // Blend base and detail noise (70% base, 30% detail) to break up large patches
+                biomeNoise = biomeNoise * 0.7f + detailNoise * 0.3f;
+            }
 
             BiomeData biome;
 
+            // First determine ocean vs land
             if (biomeNoise < world.oceanCoverage)
             {
                 biome = BiomeRegistry.GetBiome(BiomeType.Ocean);
+                biome.waterLevel = world.seaLevel;
+                biome.maxDepth = world.maxOceanDepth;
             }
             else
             {
-                biome = BiomeRegistry.GetBiome(BiomeType.Plains);
+                // For land biomes, check for forest using separate noise layer
+                float forestX = position.x * world.forestNoiseScale + seedOffset * 2.5f;
+                float forestZ = position.z * world.forestNoiseScale + seedOffset * 3.7f;
+                float forestNoise = Mathf.PerlinNoise(forestX, forestZ);
+
+                // Add detail noise for forest too if size limiting is enabled
+                if (world.maxBiomeSize > 0)
+                {
+                    float forestDetailScale = 1f / Mathf.Max(1f, world.maxBiomeSize * 0.3f);
+                    float forestDetailX = position.x * forestDetailScale + seedOffset * 1.41f;
+                    float forestDetailZ = position.z * forestDetailScale + seedOffset * 1.73f;
+                    float forestDetailNoise = Mathf.PerlinNoise(forestDetailX, forestDetailZ);
+                    forestNoise = forestNoise * 0.7f + forestDetailNoise * 0.3f;
+                }
+
+                // Forest appears where noise is below coverage threshold (e.g., 0.15 = 15% of land)
+                if (forestNoise < world.forestCoverage)
+                {
+                    biome = BiomeRegistry.GetBiome(BiomeType.Forest);
+                    // Apply inspector overrides for Forest vegetation
+                    biome.treeDensity = world.forestTreeDensity;
+                    biome.plantDensity = world.forestPlantDensity;
+                }
+                else
+                {
+                    biome = BiomeRegistry.GetBiome(BiomeType.Plains);
+                    biome.waterLevel = world.seaLevel;
+                    // Apply inspector overrides for Plains vegetation
+                    biome.treeDensity = world.plainsTreeDensity;
+                    biome.plantDensity = world.plainsPlantDensity;
+                }
             }
 
             return biome;

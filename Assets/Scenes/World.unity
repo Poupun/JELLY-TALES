@@ -2106,9 +2106,15 @@ MonoBehaviour:
   northSouthShade: 0.85
   bottomShade: 0.7
   variationStrength: 0.143
-  oceanCoverage: 1
+  oceanCoverage: 0.161
   seaLevel: 104
   maxOceanDepth: 40
+  plainsTreeDensity: 0.062
+  plainsPlantDensity: 0.15
+  forestCoverage: 0
+  forestNoiseScale: 0.015
+  forestTreeDensity: 3
+  forestPlantDensity: 0.35
   debugSpawnOnBeach: 0
   debugAlwaysTeleportToBeach: 0
   debugBeachSearchRadius: 8
@@ -2122,7 +2128,7 @@ MonoBehaviour:
   coastalSandNoiseAmplitude: 0.352
   waterTransparency: 1
   enableTrees: 1
-  treesPerChunk: 0.14
+  treesPerChunk: 3
   treeSeedOffset: 98765
   treeGridSize: 6
   minTrunkHeight: 6

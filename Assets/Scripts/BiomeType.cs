@@ -110,6 +110,23 @@ public static class BiomeRegistry
             treeDensity = 0f,
             enablePlants = false,    // No grass plants on sand
             plantDensity = 0f
+        },
+
+        // Forest biome (dense vegetation pockets)
+        new BiomeData(BiomeType.Forest, "Forest", new Color(0.2f, 0.5f, 0.2f))
+        {
+            baseElevation = 102,     // Slightly higher than plains for natural variation
+            terrainScale = 0.009f,   // Slightly more varied terrain than plains
+            terrainAmplitude = 18f,  // Bit more hilly than plains
+            hillThreshold = 0.25f,   // More frequent small hills
+            hillMultiplier = 2.2f,   // Slightly more pronounced hills
+            surfaceBlock = BlockType.Grass,
+            subSurfaceBlock = BlockType.Dirt,
+            deepBlock = BlockType.Stone,
+            enableTrees = true,      // Dense trees!
+            treeDensity = 0.45f,     // Much higher than plains (0.14f) - very dense forest
+            enablePlants = true,     // Dense undergrowth
+            plantDensity = 0.35f     // Higher than plains (0.15f) - lush forest floor
         }
     };
 

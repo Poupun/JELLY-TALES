@@ -153,6 +153,36 @@ public class WorldGenerator : MonoBehaviour
     [Tooltip("Maximum depth of ocean floors below sea level")]
     public int maxOceanDepth = 40;
 
+    [Header("Biome Size Control")]
+    [Tooltip("Scale for ocean/plains biome noise (HIGHER = SMALLER biomes, LOWER = LARGER biomes)")]
+    [Range(0.001f, 0.05f)] public float oceanPlainsNoiseScale = 0.008f;
+    [Tooltip("Maximum biome size in blocks (approximate diameter, 0 = unlimited)")]
+    [Range(0, 500)] public int maxBiomeSize = 150;
+
+    [Header("Plains Biome Vegetation")]
+    [Tooltip("Tree density in Plains biome (0.14 = 14% chance of trees)")]
+    [Range(0f, 2f)] public float plainsTreeDensity = 0.14f;
+    [Tooltip("Plant density in Plains biome (0.15 = 15% grass coverage)")]
+    [Range(0f, 2f)] public float plainsPlantDensity = 0.15f;
+
+    [Header("Forest Biome Settings")]
+    [Tooltip("Percentage of non-ocean land that becomes forest (0.15 = 15% of land is forest, distributed everywhere)")]
+    [Range(0f, 0.5f)] public float forestCoverage = 0.15f;
+    [Tooltip("Scale of forest biome noise (higher = larger forest patches, lower = smaller pockets)")]
+    [Range(0.005f, 0.05f)] public float forestNoiseScale = 0.015f;
+    [Tooltip("Tree density in Forest biome (0.45 = 45%, can go above 1.0 for extreme density)")]
+    [Range(0f, 3f)] public float forestTreeDensity = 0.45f;
+    [Tooltip("Plant density in Forest biome (0.35 = 35%, can go above 1.0 for extreme density)")]
+    [Range(0f, 3f)] public float forestPlantDensity = 0.35f;
+
+    [Header("Biome Transition Blending")]
+    [Tooltip("Enable smooth blending of tree density at biome boundaries (prevents harsh transitions)")]
+    public bool enableBiomeBlending = true;
+    [Tooltip("Blend distance in blocks (higher = smoother but wider transition zones)")]
+    [Range(1, 32)] public int biomeBlendDistance = 20;
+    [Tooltip("Terrain smoothness at biome transitions (higher = smoother, more gradual)")]
+    [Range(0f, 1f)] public float terrainBlendSmoothness = 0.7f;
+
     [Header("Debug: Biome Spawn Testing")]
     [Tooltip("Enable this to spawn player on a beach biome transition for testing")]
     public bool debugSpawnOnBeach = false;
@@ -183,11 +213,11 @@ public class WorldGenerator : MonoBehaviour
     [Tooltip("Water transparency (0 = invisible, 1 = normal, 5 = very opaque)")]
     [Range(0f, 5f)] public float waterTransparency = 0.7f;
 
-    [Header("Trees")] 
+    [Header("Trees")]
     [Tooltip("Enable procedural tree generation (advanced)." )]
     public bool enableTrees = true;
-    [Tooltip("Average number of trees per chunk (scaled by noise + randomness)." )]
-    [Min(0f)] public float treesPerChunk = 0.15f;
+    [Tooltip("DEPRECATED: Tree density is now controlled per-biome (see Plains/Forest Biome Settings above)." )]
+    [HideInInspector] public float treesPerChunk = 0.15f; // Kept for backwards compatibility, no longer used
     [Tooltip("Seed offset for tree placement noise.")]
     public int treeSeedOffset = 98765;
     [Header("Tree Placement")] 
@@ -1744,28 +1774,137 @@ public class WorldGenerator : MonoBehaviour
     {
         // Get biome data for this position
         Vector3 worldPos = new Vector3(worldX, 0, worldZ);
-        BiomeData biome = GetBiomeDataAt(worldPos);
+
+        // Blend biome properties from surrounding biomes for smooth terrain transitions
+        BiomeData biome;
+        float blendedBaseElevation;
+        float blendedTerrainScale;
+        float blendedTerrainAmplitude;
+        float blendedHillThreshold;
+        float blendedHillMultiplier;
+
+        if (enableBiomeBlending && biomeBlendDistance > 0)
+        {
+            // Check distance to biome boundary for consistent transition zones
+            float boundaryDistance = GetBiomeBoundaryDistance(worldPos);
+
+            // Use smooth gradient-based blending for natural transitions
+            // Scale blend radius based on how close we are to a boundary
+            float blendRadius = biomeBlendDistance * (1f + (1f - boundaryDistance) * 0.5f);
+
+            // Sample biomes in a circle around the position with distance-based weights
+            float totalWeight = 0f;
+            float weightedBaseElevation = 0f;
+            float weightedTerrainScale = 0f;
+            float weightedTerrainAmplitude = 0f;
+            float weightedHillThreshold = 0f;
+            float weightedHillMultiplier = 0f;
+
+            // Sample pattern: center + 8 directions at multiple distances
+            Vector2[] directions = new Vector2[]
+            {
+                new Vector2(0, 0),      // Center
+                new Vector2(1, 0),      // East
+                new Vector2(-1, 0),     // West
+                new Vector2(0, 1),      // North
+                new Vector2(0, -1),     // South
+                new Vector2(0.707f, 0.707f),   // NE
+                new Vector2(-0.707f, 0.707f),  // NW
+                new Vector2(0.707f, -0.707f),  // SE
+                new Vector2(-0.707f, -0.707f), // SW
+            };
+
+            // Sample at multiple distances for smooth gradient
+            float[] distances = new float[] { 0f, blendRadius * 0.5f, blendRadius };
+
+            foreach (float dist in distances)
+            {
+                foreach (Vector2 dir in directions)
+                {
+                    if (dist == 0f && dir != Vector2.zero) continue; // Skip non-center at distance 0
+
+                    Vector3 samplePos = new Vector3(
+                        worldX + dir.x * dist,
+                        0,
+                        worldZ + dir.y * dist
+                    );
+
+                    BiomeData sampleBiome = GetBiomeDataAt(samplePos);
+
+                    // Distance-based weight (closer = more influence)
+                    // Use smooth falloff curve for natural blending
+                    float normalizedDist = dist / blendRadius;
+                    float weight = 1f - normalizedDist; // Linear falloff
+
+                    // Apply smoothness curve (higher smoothness = more gradual)
+                    weight = Mathf.Pow(weight, 1f + (1f - terrainBlendSmoothness) * 2f);
+                    weight = Mathf.SmoothStep(0f, 1f, weight); // Additional smoothing
+
+                    weightedBaseElevation += sampleBiome.baseElevation * weight;
+                    weightedTerrainScale += sampleBiome.terrainScale * weight;
+                    weightedTerrainAmplitude += sampleBiome.terrainAmplitude * weight;
+                    weightedHillThreshold += sampleBiome.hillThreshold * weight;
+                    weightedHillMultiplier += sampleBiome.hillMultiplier * weight;
+                    totalWeight += weight;
+                }
+            }
+
+            // Normalize by total weight
+            blendedBaseElevation = weightedBaseElevation / totalWeight;
+            blendedTerrainScale = weightedTerrainScale / totalWeight;
+            blendedTerrainAmplitude = weightedTerrainAmplitude / totalWeight;
+            blendedHillThreshold = weightedHillThreshold / totalWeight;
+            blendedHillMultiplier = weightedHillMultiplier / totalWeight;
+            biome = GetBiomeDataAt(worldPos); // Still need for type-specific logic
+        }
+        else
+        {
+            // No blending - use single biome (old behavior)
+            biome = GetBiomeDataAt(worldPos);
+            blendedBaseElevation = biome.baseElevation;
+            blendedTerrainScale = biome.terrainScale;
+            blendedTerrainAmplitude = biome.terrainAmplitude;
+            blendedHillThreshold = biome.hillThreshold;
+            blendedHillMultiplier = biome.hillMultiplier;
+        }
 
         float seedOffset = (worldSeed % 10000) * 0.01f;
 
-        // Use biome-specific terrain parameters
-        float baseX = worldX * biome.terrainScale + seedOffset;
-        float baseZ = worldZ * biome.terrainScale + seedOffset;
+        // Use blended terrain parameters
+        float baseX = worldX * blendedTerrainScale + seedOffset;
+        float baseZ = worldZ * blendedTerrainScale + seedOffset;
         float baseNoise = Mathf.PerlinNoise(baseX, baseZ);
 
-        // Hill detection using biome parameters
-        float hillX = worldX * (biome.terrainScale * 2f) + seedOffset * 1.7f;
-        float hillZ = worldZ * (biome.terrainScale * 2f) + seedOffset * 1.7f;
+        // Hill detection using blended terrain parameters
+        float hillX = worldX * (blendedTerrainScale * 2f) + seedOffset * 1.7f;
+        float hillZ = worldZ * (blendedTerrainScale * 2f) + seedOffset * 1.7f;
         float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
 
-        // Use biome-specific hill threshold and multiplier
-        float hillMultiplier = hillNoise > biome.hillThreshold ?
-            Mathf.Pow((hillNoise - biome.hillThreshold) / (1f - biome.hillThreshold), 1.2f) * biome.hillMultiplier : 0f;
+        // Use blended hill threshold and multiplier
+        float hillMultiplier = hillNoise > blendedHillThreshold ?
+            Mathf.Pow((hillNoise - blendedHillThreshold) / (1f - blendedHillThreshold), 1.2f) * blendedHillMultiplier : 0f;
 
         // Small detail noise for micro-variations
         float detailX = worldX * 0.05f + seedOffset;
         float detailZ = worldZ * 0.05f + seedOffset;
         float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
+
+        // Smooth noise reduction when blending is active to prevent stepping
+        if (enableBiomeBlending && terrainBlendSmoothness > 0.3f)
+        {
+            // Calculate boundary distance for consistent smoothing
+            float boundaryDist = GetBiomeBoundaryDistance(worldPos);
+
+            // Apply more smoothing near boundaries (where boundaryDist is lower)
+            float boundaryInfluence = 1f - boundaryDist; // 0 = center of biome, 1 = at boundary
+            float smoothFactor = terrainBlendSmoothness * Mathf.Lerp(0.3f, 1f, boundaryInfluence);
+
+            // Reduce detail noise intensity in transition zones for smoother look
+            detailNoise *= (1f - smoothFactor * 0.5f);
+
+            // Also slightly reduce hill variation for smoother transitions
+            hillMultiplier *= (1f - smoothFactor * 0.3f);
+        }
 
         // Add wave-like ondulation for ocean biomes (sand dunes/ripples)
         float waveNoise = 0f;
@@ -1789,9 +1928,9 @@ public class WorldGenerator : MonoBehaviour
             waveNoise = wave1 + wave2 + ripple;
         }
 
-        // Combine using biome-specific base elevation and amplitude
-        float combinedHeight = biome.baseElevation + baseNoise * biome.terrainAmplitude +
-                               hillMultiplier * (biome.terrainAmplitude * 0.5f) + detailNoise + waveNoise;
+        // Combine using BLENDED base elevation and amplitude for smooth transitions
+        float combinedHeight = blendedBaseElevation + baseNoise * blendedTerrainAmplitude +
+                               hillMultiplier * (blendedTerrainAmplitude * 0.5f) + detailNoise + waveNoise;
         int surfaceHeight = Mathf.RoundToInt(combinedHeight);
 
         if (biome.type == BiomeType.Plains)
@@ -1896,24 +2035,114 @@ public class WorldGenerator : MonoBehaviour
       private BiomeType GetBaseBiomeTypeAt(Vector3 worldPos)
       {
           float seedOffset = (worldSeed * 0.01f);
-          float biomeX = worldPos.x * 0.002f + seedOffset;
-          float biomeZ = worldPos.z * 0.002f + seedOffset;
+
+          // Use inspector-controlled noise scale for ocean/plains biomes
+          float biomeX = worldPos.x * oceanPlainsNoiseScale + seedOffset;
+          float biomeZ = worldPos.z * oceanPlainsNoiseScale + seedOffset;
           float biomeNoise = Mathf.PerlinNoise(biomeX, biomeZ);
 
+          // Optional: Add high-frequency noise to break up large biomes
+          if (maxBiomeSize > 0)
+          {
+              float detailScale = 1f / Mathf.Max(1f, maxBiomeSize * 0.5f);
+              float detailX = worldPos.x * detailScale + seedOffset * 3.14f;
+              float detailZ = worldPos.z * detailScale + seedOffset * 2.71f;
+              float detailNoise = Mathf.PerlinNoise(detailX, detailZ);
+              // Blend base and detail noise (70% base, 30% detail) to break up large patches
+              biomeNoise = biomeNoise * 0.7f + detailNoise * 0.3f;
+          }
+
+          // First determine ocean vs land
           if (biomeNoise < oceanCoverage)
           {
               return BiomeType.Ocean;
+          }
+
+          // For land biomes, check for forest using separate noise layer
+          float forestX = worldPos.x * forestNoiseScale + seedOffset * 2.5f;
+          float forestZ = worldPos.z * forestNoiseScale + seedOffset * 3.7f;
+          float forestNoise = Mathf.PerlinNoise(forestX, forestZ);
+
+          // Add detail noise for forest too if size limiting is enabled
+          if (maxBiomeSize > 0)
+          {
+              float forestDetailScale = 1f / Mathf.Max(1f, maxBiomeSize * 0.3f);
+              float forestDetailX = worldPos.x * forestDetailScale + seedOffset * 1.41f;
+              float forestDetailZ = worldPos.z * forestDetailScale + seedOffset * 1.73f;
+              float forestDetailNoise = Mathf.PerlinNoise(forestDetailX, forestDetailZ);
+              forestNoise = forestNoise * 0.7f + forestDetailNoise * 0.3f;
+          }
+
+          // Forest appears where noise is below coverage threshold (e.g., 0.15 = 15% of land)
+          if (forestNoise < forestCoverage)
+          {
+              return BiomeType.Forest;
           }
 
           return BiomeType.Plains;
       }
 
       /// <summary>
-      /// Gets biome type (Plains or Ocean)
+      /// Gets biome type (Plains, Ocean, or Forest)
       /// </summary>
       public BiomeType GetBiomeTypeAt(Vector3 worldPos)
       {
           return GetBaseBiomeTypeAt(worldPos);
+      }
+
+      /// <summary>
+      /// Calculate how far this position is from a biome boundary (0 = boundary, 1 = center of biome)
+      /// Used to create consistent transition zones
+      /// </summary>
+      private float GetBiomeBoundaryDistance(Vector3 worldPos)
+      {
+          float seedOffset = (worldSeed * 0.01f);
+
+          // Ocean/Plains boundary distance
+          float biomeX = worldPos.x * oceanPlainsNoiseScale + seedOffset;
+          float biomeZ = worldPos.z * oceanPlainsNoiseScale + seedOffset;
+          float biomeNoise = Mathf.PerlinNoise(biomeX, biomeZ);
+
+          // Smooth biome noise to reduce high-frequency noise
+          float smoothBiomeNoise = biomeNoise;
+          if (maxBiomeSize > 0)
+          {
+              float detailScale = 1f / Mathf.Max(1f, maxBiomeSize * 0.5f);
+              float detailNoise = Mathf.PerlinNoise(worldPos.x * detailScale + seedOffset * 3.14f,
+                                                     worldPos.z * detailScale + seedOffset * 2.71f);
+              smoothBiomeNoise = biomeNoise * 0.85f + detailNoise * 0.15f; // Less detail = smoother
+          }
+
+          float oceanDistance = Mathf.Abs(smoothBiomeNoise - oceanCoverage);
+
+          // Forest/Plains boundary distance (only if on land)
+          float forestDistance = 1f;
+          if (smoothBiomeNoise >= oceanCoverage)
+          {
+              float forestX = worldPos.x * forestNoiseScale + seedOffset * 2.5f;
+              float forestZ = worldPos.z * forestNoiseScale + seedOffset * 3.7f;
+              float forestNoise = Mathf.PerlinNoise(forestX, forestZ);
+
+              // Smooth forest noise
+              if (maxBiomeSize > 0)
+              {
+                  float forestDetailScale = 1f / Mathf.Max(1f, maxBiomeSize * 0.3f);
+                  float forestDetailNoise = Mathf.PerlinNoise(worldPos.x * forestDetailScale + seedOffset * 1.41f,
+                                                               worldPos.z * forestDetailScale + seedOffset * 1.73f);
+                  forestNoise = forestNoise * 0.85f + forestDetailNoise * 0.15f; // Less detail = smoother
+              }
+
+              forestDistance = Mathf.Abs(forestNoise - forestCoverage);
+          }
+
+          // Return the minimum distance (closest boundary)
+          float minDistance = Mathf.Min(oceanDistance, forestDistance);
+
+          // Normalize to 0-1 range based on typical boundary width
+          float normalizedDistance = Mathf.Clamp01(minDistance / 0.1f);
+
+          // Apply smooth curve for gradual transition
+          return Mathf.SmoothStep(0f, 1f, normalizedDistance);
       }
 
       private float GetCoastalFactor(Vector3 worldPos)
@@ -2003,6 +2232,15 @@ public class WorldGenerator : MonoBehaviour
         else if (biome.type == BiomeType.Plains)
         {
             biome.waterLevel = seaLevel;
+            // Apply inspector overrides for Plains vegetation
+            biome.treeDensity = plainsTreeDensity;
+            biome.plantDensity = plainsPlantDensity;
+        }
+        else if (biome.type == BiomeType.Forest)
+        {
+            // Apply inspector overrides for Forest vegetation
+            biome.treeDensity = forestTreeDensity;
+            biome.plantDensity = forestPlantDensity;
         }
 
         return biome;
@@ -3559,10 +3797,46 @@ public class WorldGenerator : MonoBehaviour
                 int cz = gz + grid / 2;
                 float baseNoise = Mathf.PerlinNoise((cx + worldSeed) * 0.01f, (cz + worldSeed) * 0.01f); // [0,1]
                 float densityScale = Mathf.Clamp01(0.6f + 0.4f * baseNoise);
-                // Expected trees per block
-                float densityPerBlock = (treesPerChunk <= 0f || chunk.sizeX <= 0 || chunk.sizeZ <= 0)
+
+                // Biome blending for smooth transitions
+                float biomeDensity;
+
+                if (enableBiomeBlending)
+                {
+                    // Sample multiple points around cell center for smooth biome blending
+                    biomeDensity = 0f;
+                    int sampleRadius = biomeBlendDistance; // Use inspector parameter
+                    Vector3[] samplePoints = new Vector3[]
+                    {
+                        new Vector3(cx, 0, cz),                    // Center (weighted more)
+                        new Vector3(cx, 0, cz),                    // Center again for 2x weight
+                        new Vector3(cx + sampleRadius, 0, cz),     // East
+                        new Vector3(cx - sampleRadius, 0, cz),     // West
+                        new Vector3(cx, 0, cz + sampleRadius),     // North
+                        new Vector3(cx, 0, cz - sampleRadius),     // South
+                        new Vector3(cx + sampleRadius/2, 0, cz + sampleRadius/2), // NE diagonal
+                        new Vector3(cx - sampleRadius/2, 0, cz - sampleRadius/2), // SW diagonal
+                    };
+
+                    // Blend tree density from surrounding biomes for smooth transitions
+                    foreach (var samplePos in samplePoints)
+                    {
+                        BiomeData sampleBiome = GetBiomeDataAt(samplePos);
+                        biomeDensity += sampleBiome.treeDensity;
+                    }
+                    biomeDensity /= samplePoints.Length; // Average density
+                }
+                else
+                {
+                    // No blending - use only center biome (old behavior)
+                    BiomeData cellBiome = GetBiomeDataAt(new Vector3(cx, 0, cz));
+                    biomeDensity = cellBiome.treeDensity;
+                }
+
+                // Expected trees per block using biome density
+                float densityPerBlock = (biomeDensity <= 0f || chunk.sizeX <= 0 || chunk.sizeZ <= 0)
                     ? 0f
-                    : treesPerChunk / (float)(chunk.sizeX * chunk.sizeZ);
+                    : biomeDensity / (float)(chunk.sizeX * chunk.sizeZ);
                 float pCell = Mathf.Clamp01(densityPerBlock * (grid * grid) * densityScale);
 
                 // Deterministic PRNG per cell
