@@ -307,6 +307,10 @@ public class WorldGenerator : MonoBehaviour
     // Track leaf wind toggle to live-swap shaders safely
     private bool _lastEnableLeafWindToggle = false;
 
+    // Runtime optimization: Update material properties less frequently
+    private float _lastMaterialUpdateTime = 0f;
+    private const float MATERIAL_UPDATE_INTERVAL = 0.05f; // Update every 50ms instead of every 16ms frame
+
     // Small integer hash for variation (kept here for chunk mesher)
     public static float Hash(int x, int y, int z)
     {
@@ -2783,25 +2787,11 @@ public class WorldGenerator : MonoBehaviour
         {
             yield return StartCoroutine(GenerateChunkWithJobSystem(chunk, coord));
         }
-        // Priority 2: Use ultra-smooth generation for virtually zero micro-freezes
-        else if (GetComponent<WorldGeneration.Chunks.UltraSmoothChunkGenerator>() != null)
-        {
-            var ultraSmooth = GetComponent<WorldGeneration.Chunks.UltraSmoothChunkGenerator>();
-            yield return StartCoroutine(ultraSmooth.GenerateChunkUltraSmooth(chunk, coord));
-        }
-        // Priority 3: Use optimizer as fallback
+        // Priority 2: Use fallback coroutine-based generation (for systems without Jobs)
         else
         {
-            var optimizer = GetComponent<WorldGeneration.Chunks.ChunkGenerationOptimizer>();
-            if (optimizer != null)
-            {
-                yield return StartCoroutine(optimizer.GenerateChunkOptimized(chunk, coord));
-            }
-            else
-            {
-                // Final fallback to traditional generation
-                yield return StartCoroutine(GenerateChunkTraditionalOptimized(chunk, coord));
-            }
+            yield return StartCoroutine(WorldGeneration.Chunks.ChunkGenerationFallback.GenerateChunkAsync(
+                chunk, coord, chunkSizeX, worldHeight, chunkSizeZ, worldSeed, enableTunnels, tunnelSettings));
         }
 
         // Apply persisted edits
@@ -4764,7 +4754,7 @@ public class WorldGenerator : MonoBehaviour
         Debug.Log($"WorldGenerator: Saved chunk {coord} with {map.Count} changes to {savePath} for world '{currentWorldName}'");
     }
 
-    private void LoadChunkFromDiskInto(Vector2Int coord, WorldGeneration.Chunks.Chunk chunk)
+    public void LoadChunkFromDiskInto(Vector2Int coord, WorldGeneration.Chunks.Chunk chunk)
     {
         if (!enableChunkPersistence) return;
         var path = GetChunkSavePath(coord);

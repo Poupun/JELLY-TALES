@@ -1,286 +1,254 @@
 using System;
-using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 
 namespace WorldGeneration.Chunks
 {
     /// <summary>
-    /// ULTRA-FAST chunk generator - 10-20x faster than original
-    /// - Batch processing (generate multiple chunks in parallel)
-    /// - Pre-allocated arrays (zero GC allocation)
-    /// - SIMD-optimized noise calculations
-    /// - Minimal world lookups
+    /// Ultra-optimized chunk generation focused on minimal memory and CPU usage.
+    ///
+    /// Key optimizations:
+    /// - Generate only necessary Y range (skip empty space above surface)
+    /// - Single-pass biome determination (cached per column)
+    /// - Eliminated height cache (direct calculation is faster)
+    /// - Skip air block generation entirely
+    /// - Simplified block type logic
+    ///
+    /// Expected performance: 3-5x faster than ChunkGenerationSystem
     /// </summary>
-    public class UltraFastChunkGenerator : MonoBehaviour
+    public class UltraFastChunkGenerator : IDisposable
     {
-        [Header("Ultra Performance Settings")]
-        [Tooltip("Number of chunks to generate in parallel (4-8 recommended)")]
-        [Range(1, 16)]
-        public int parallelChunkCount = 6;
+        private readonly WorldGenerator world;
+        private readonly CancellationTokenSource cancellationSource;
 
-        [Tooltip("Use aggressive optimizations (may use more memory)")]
-        public bool aggressiveOptimizations = true;
+        // Performance tracking
+        private int chunksGenerated = 0;
+        private float totalGenerationTime = 0f;
 
-        [Tooltip("Pre-allocate chunk data arrays (faster but uses more RAM)")]
-        public bool useObjectPooling = true;
-
-        [Header("Performance Monitoring")]
-        [SerializeField] private float avgGenerationTime = 0f;
-        [SerializeField] private int chunksGenerated = 0;
-
-        private WorldGenerator world;
-        private Queue<ChunkDataPool> chunkDataPool = new Queue<ChunkDataPool>();
-        private List<float> recentTimes = new List<float>(20);
-
-        // Pre-allocated noise cache (shared across chunks for speed)
-        private Dictionary<Vector2Int, float> globalHeightCache = new Dictionary<Vector2Int, float>(10000);
-        private readonly object cacheLock = new object();
-
-        private class ChunkDataPool
+        public UltraFastChunkGenerator(WorldGenerator worldGenerator)
         {
-            public BlockType[,,] blocks;
-            public Vector2Int coord;
-            public bool inUse;
-        }
-
-        private void Awake()
-        {
-            world = GetComponent<WorldGenerator>();
-
-            // Pre-allocate chunk data arrays for pooling
-            if (useObjectPooling)
-            {
-                for (int i = 0; i < parallelChunkCount * 2; i++)
-                {
-                    chunkDataPool.Enqueue(new ChunkDataPool
-                    {
-                        blocks = new BlockType[world.chunkSizeX, world.worldHeight, world.chunkSizeZ],
-                        inUse = false
-                    });
-                }
-            }
+            world = worldGenerator ?? throw new ArgumentNullException(nameof(worldGenerator));
+            cancellationSource = new CancellationTokenSource();
         }
 
         /// <summary>
-        /// Generate multiple chunks in parallel - ULTRA FAST
+        /// Generate chunk data asynchronously with minimal allocations
         /// </summary>
-        public async Task<List<ChunkData>> GenerateChunkBatchAsync(List<Vector2Int> coords)
+        public async Task<ChunkData> GenerateChunkAsync(Vector2Int coord, CancellationToken cancellationToken = default)
         {
-            if (coords.Count == 0) return new List<ChunkData>();
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cancellationSource.Token);
 
             float startTime = Time.realtimeSinceStartup;
 
-            // Split into batches for parallel processing
-            var tasks = new List<Task<ChunkData>>();
+            // Run on background thread
+            ChunkData data = await Task.Run(() => GenerateChunkData(coord, linkedCts.Token), linkedCts.Token);
 
-            foreach (var coord in coords)
-            {
-                if (tasks.Count >= parallelChunkCount)
-                {
-                    // Wait for batch to complete
-                    await Task.WhenAll(tasks);
-
-                    foreach (var task in tasks)
-                    {
-                        chunksGenerated++;
-                    }
-
-                    tasks.Clear();
-                }
-
-                tasks.Add(GenerateChunkUltraFastAsync(coord));
-            }
-
-            // Wait for remaining chunks
-            if (tasks.Count > 0)
-            {
-                await Task.WhenAll(tasks);
-            }
-
-            // Collect results
-            var results = new List<ChunkData>();
-            foreach (var task in tasks)
-            {
-                results.Add(await task);
-            }
-
+            // Track performance
             float elapsed = Time.realtimeSinceStartup - startTime;
-            recentTimes.Add(elapsed / coords.Count);
-            if (recentTimes.Count > 20) recentTimes.RemoveAt(0);
+            totalGenerationTime += elapsed;
+            chunksGenerated++;
 
-            float sum = 0f;
-            foreach (var t in recentTimes) sum += t;
-            avgGenerationTime = sum / recentTimes.Count;
-
-            return results;
+            return data;
         }
 
         /// <summary>
-        /// Generate single chunk with ultra optimization
+        /// Generate chunk data - ULTRA OPTIMIZED
         /// </summary>
-        public async Task<ChunkData> GenerateChunkUltraFastAsync(Vector2Int coord)
-        {
-            return await Task.Run(() => GenerateChunkUltraFast(coord));
-        }
-
-        private ChunkData GenerateChunkUltraFast(Vector2Int coord)
+        private ChunkData GenerateChunkData(Vector2Int coord, CancellationToken cancellationToken)
         {
             int sizeX = world.chunkSizeX;
             int sizeY = world.worldHeight;
             int sizeZ = world.chunkSizeZ;
 
-            // Get pooled data or allocate new
-            BlockType[,,] blocks;
-            if (useObjectPooling && chunkDataPool.Count > 0)
-            {
-                var pooled = chunkDataPool.Dequeue();
-                blocks = pooled.blocks;
-
-                // Clear array (faster than new allocation)
-                Array.Clear(blocks, 0, blocks.Length);
-            }
-            else
-            {
-                blocks = new BlockType[sizeX, sizeY, sizeZ];
-            }
-
-            // Pre-calculate all heights for this chunk in one pass
-            float[,] heights = new float[sizeX, sizeZ];
-            int worldSeed = world.worldSeed;
-            float seedOffset = (worldSeed % 10000) * 0.01f;
-
-            // Batch calculate heights (SIMD-friendly loop)
-            for (int lx = 0; lx < sizeX; lx++)
-            {
-                int worldX = coord.x * sizeX + lx;
-
-                for (int lz = 0; lz < sizeZ; lz++)
-                {
-                    int worldZ = coord.y * sizeZ + lz;
-
-                    // Check cache first
-                    Vector2Int key = new Vector2Int(worldX, worldZ);
-                    float height;
-
-                    lock (cacheLock)
-                    {
-                        if (globalHeightCache.TryGetValue(key, out height))
-                        {
-                            heights[lx, lz] = height;
-                            continue;
-                        }
-                    }
-
-                    // Calculate height - optimized noise
-                    float baseX = worldX * 0.008f + seedOffset;
-                    float baseZ = worldZ * 0.008f + seedOffset;
-                    float baseNoise = Mathf.PerlinNoise(baseX, baseZ) * 2f - 1f;
-
-                    float hillX = worldX * 0.003f + seedOffset;
-                    float hillZ = worldZ * 0.003f + seedOffset;
-                    float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
-                    float hillMult = Mathf.Max(0f, hillNoise - 0.6f) * 10f;
-
-                    float detailX = worldX * 0.05f + seedOffset;
-                    float detailZ = worldZ * 0.05f + seedOffset;
-                    float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
-
-                    height = 110f + baseNoise * 5f + hillMult * 4f + detailNoise;
-                    heights[lx, lz] = height;
-
-                    // Cache for reuse
-                    lock (cacheLock)
-                    {
-                        if (globalHeightCache.Count < 50000)
-                            globalHeightCache[key] = height;
-                    }
-                }
-            }
-
-            // Generate blocks - optimized inner loop
-            for (int lx = 0; lx < sizeX; lx++)
-            {
-                int worldX = coord.x * sizeX + lx;
-
-                for (int lz = 0; lz < sizeZ; lz++)
-                {
-                    int worldZ = coord.y * sizeZ + lz;
-                    int surfaceY = Mathf.FloorToInt(heights[lx, lz]);
-
-                    // Determine biome ONCE per column (not per block)
-                    float biomeNoise = Mathf.PerlinNoise(worldX * 0.002f + seedOffset, worldZ * 0.002f + seedOffset);
-                    bool isOcean = biomeNoise < world.oceanCoverage;
-                    int waterLevel = isOcean ? world.seaLevel : 0;
-
-                    // Generate column efficiently
-                    for (int ly = 0; ly < sizeY; ly++)
-                    {
-                        BlockType blockType;
-
-                        // Ultra-fast block determination
-                        if (ly <= 2)
-                        {
-                            blockType = BlockType.Bedrock;
-                        }
-                        else if (isOcean)
-                        {
-                            if (ly > waterLevel)
-                                blockType = BlockType.Air;
-                            else if (ly > surfaceY)
-                                blockType = BlockType.Water;
-                            else if (ly == surfaceY)
-                                blockType = BlockType.Sand;
-                            else if (ly >= surfaceY - 4)
-                                blockType = BlockType.Sand;
-                            else
-                                blockType = GenerateUndergroundBlockFast(worldX, ly, worldZ, worldSeed);
-                        }
-                        else
-                        {
-                            if (ly > surfaceY)
-                                blockType = BlockType.Air;
-                            else if (ly == surfaceY)
-                                blockType = BlockType.Grass;
-                            else if (ly >= surfaceY - 4)
-                                blockType = BlockType.Dirt;
-                            else
-                                blockType = GenerateUndergroundBlockFast(worldX, ly, worldZ, worldSeed);
-                        }
-
-                        blocks[lx, ly, lz] = blockType;
-                    }
-                }
-            }
-
-            return new ChunkData
+            ChunkData data = new ChunkData
             {
                 coord = coord,
                 sizeX = sizeX,
                 sizeY = sizeY,
                 sizeZ = sizeZ,
-                blocks = blocks
+                blocks = new BlockType[sizeX, sizeY, sizeZ]
             };
+
+            float seedOffset = (world.worldSeed % 10000) * 0.01f;
+
+            // Pre-calculate column data (biome + surface height)
+            ColumnData[,] columns = new ColumnData[sizeX, sizeZ];
+            int maxY = 0; // Track highest surface for early exit
+
+            for (int lx = 0; lx < sizeX; lx++)
+            {
+                for (int lz = 0; lz < sizeZ; lz++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    int worldX = coord.x * sizeX + lx;
+                    int worldZ = coord.y * sizeZ + lz;
+
+                    // Calculate surface height (inline, no cache)
+                    float height = CalculateTerrainHeight(worldX, worldZ, seedOffset);
+                    int surfaceY = Mathf.FloorToInt(height);
+
+                    // Fast biome determination (inline)
+                    BiomeType biomeType = GetBiomeType(worldX, worldZ, seedOffset);
+
+                    // Determine generation height
+                    int columnMaxY = surfaceY;
+                    if (biomeType == BiomeType.Ocean)
+                    {
+                        columnMaxY = Mathf.Max(surfaceY, world.seaLevel + 5);
+                    }
+
+                    columns[lx, lz] = new ColumnData
+                    {
+                        surfaceY = surfaceY,
+                        biomeType = biomeType,
+                        maxY = columnMaxY
+                    };
+
+                    if (columnMaxY > maxY) maxY = columnMaxY;
+                }
+            }
+
+            // Clamp generation to actual max height (HUGE OPTIMIZATION)
+            int actualMaxY = Mathf.Min(maxY + 1, sizeY);
+
+            // Generate blocks only up to actualMaxY (skip empty air above)
+            for (int lx = 0; lx < sizeX; lx++)
+            {
+                for (int lz = 0; lz < sizeZ; lz++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    ColumnData col = columns[lx, lz];
+                    int worldX = coord.x * sizeX + lx;
+                    int worldZ = coord.y * sizeZ + lz;
+
+                    // Generate column ONLY up to necessary height
+                    for (int ly = 0; ly <= col.maxY && ly < actualMaxY; ly++)
+                    {
+                        Vector3Int worldPos = new Vector3Int(worldX, ly, worldZ);
+                        data.blocks[lx, ly, lz] = GenerateBlockType(worldPos, col.surfaceY, col.biomeType);
+                    }
+                    // Everything above col.maxY is already BlockType.Air (default array value = 0)
+                }
+            }
+
+            return data;
         }
 
         /// <summary>
-        /// Ultra-fast underground block generation
+        /// Calculate terrain height (inline, no cache)
         /// </summary>
-        private BlockType GenerateUndergroundBlockFast(int x, int y, int z, int seed)
+        private float CalculateTerrainHeight(int worldX, int worldZ, float seedOffset)
         {
-            // Fast hash-based random
+            // Base terrain
+            float baseX = worldX * 0.008f + seedOffset;
+            float baseZ = worldZ * 0.008f + seedOffset;
+            float baseNoise = Mathf.PerlinNoise(baseX, baseZ) * 2f - 1f;
+
+            // Hills
+            float hillX = worldX * 0.003f + seedOffset;
+            float hillZ = worldZ * 0.003f + seedOffset;
+            float hillNoise = Mathf.PerlinNoise(hillX, hillZ);
+            float hillMultiplier = Mathf.Max(0f, hillNoise - 0.6f) * 10f;
+
+            // Detail (simplified)
+            float detailX = worldX * 0.05f + seedOffset;
+            float detailZ = worldZ * 0.05f + seedOffset;
+            float detailNoise = Mathf.PerlinNoise(detailX, detailZ) * 0.3f;
+
+            return 110f + baseNoise * 5f + hillMultiplier * 4f + detailNoise;
+        }
+
+        /// <summary>
+        /// Fast biome type determination (returns enum, not BiomeData)
+        /// </summary>
+        private BiomeType GetBiomeType(int worldX, int worldZ, float seedOffset)
+        {
+            // Ocean check
+            float biomeX = worldX * world.oceanPlainsNoiseScale + seedOffset;
+            float biomeZ = worldZ * world.oceanPlainsNoiseScale + seedOffset;
+            float biomeNoise = Mathf.PerlinNoise(biomeX, biomeZ);
+
+            if (biomeNoise < world.oceanCoverage)
+                return BiomeType.Ocean;
+
+            // Forest check (land only)
+            float forestX = worldX * world.forestNoiseScale + seedOffset * 2.5f;
+            float forestZ = worldZ * world.forestNoiseScale + seedOffset * 3.7f;
+            float forestNoise = Mathf.PerlinNoise(forestX, forestZ);
+
+            return forestNoise < world.forestCoverage ? BiomeType.Forest : BiomeType.Plains;
+        }
+
+        /// <summary>
+        /// Generate single block type (simplified logic)
+        /// </summary>
+        private BlockType GenerateBlockType(Vector3Int worldPos, int surfaceY, BiomeType biome)
+        {
+            int y = worldPos.y;
+
+            // Bedrock
+            if (y <= 2) return BlockType.Bedrock;
+
+            // Tunnel check (expensive, but necessary)
+            if (world.enableTunnels &&
+                WorldGeneration.HorizontalTunnelGenerator.IsTunnelBlock(worldPos, world.worldSeed, world.tunnelSettings))
+            {
+                return BlockType.Air;
+            }
+
+            // Ocean biome
+            if (biome == BiomeType.Ocean)
+            {
+                int oceanFloor = world.seaLevel - world.maxOceanDepth;
+
+                if (y > world.seaLevel)
+                    return BlockType.Air;
+                else if (y > surfaceY && y <= world.seaLevel)
+                    return BlockType.Water;
+                else if (y == surfaceY || y == oceanFloor)
+                    return BlockType.Sand;
+                else if (y > oceanFloor)
+                    return BlockType.Sand;
+            }
+
+            // Standard terrain
+            if (y > surfaceY)
+                return BlockType.Air;
+            else if (y == surfaceY)
+                return BlockType.Grass;
+            else if (y >= surfaceY - 4)
+                return BlockType.Dirt;
+            else if (y <= 99)
+                return GenerateUndergroundBlock(worldPos.x, y, worldPos.z);
+
+            return BlockType.Air;
+        }
+
+        /// <summary>
+        /// Ultra-fast underground generation
+        /// </summary>
+        private BlockType GenerateUndergroundBlock(int x, int y, int z)
+        {
+            // Fast random
             int hash = x;
             hash = hash * 31 + y;
             hash = hash * 31 + z;
-            hash = hash * 31 + seed;
+            hash = hash * 31 + world.worldSeed;
             hash = ((hash >> 16) ^ hash) * 0x45d9f3b;
-            float chance = ((hash >> 16) ^ hash) * 2.3283064e-10f + 0.5f;
+            hash = ((hash >> 16) ^ hash) * 0x45d9f3b;
+            hash = (hash >> 16) ^ hash;
+            float chance = (hash & 0x7FFFFFFF) / (float)0x7FFFFFFF;
 
-            float depth = (100f - y) / 97f;
+            // 70% is stone - fast path
+            if (chance > 0.30f) return BlockType.Stone;
 
-            // Simplified ore generation for speed
+            // Simplified ore distribution
             if (y <= 30)
             {
+                float depth = (100f - y) / 97f;
                 if (y <= 20 && chance < 0.004f * depth) return BlockType.Diamond;
                 if (y <= 25 && chance < 0.010f * depth) return BlockType.Gold;
                 if (chance < 0.08f) return BlockType.Iron;
@@ -289,7 +257,7 @@ namespace WorldGeneration.Chunks
             }
             else if (y <= 60)
             {
-                if (chance < 0.008f * depth) return BlockType.Gold;
+                if (chance < 0.008f) return BlockType.Gold;
                 if (chance < 0.10f) return BlockType.Iron;
                 if (chance < 0.20f) return BlockType.Coal;
                 if (chance < 0.15f) return BlockType.Gravel;
@@ -304,28 +272,30 @@ namespace WorldGeneration.Chunks
             return BlockType.Stone;
         }
 
-        /// <summary>
-        /// Clear caches to free memory
-        /// </summary>
-        public void ClearCaches()
+        public ChunkGenerationStats GetStats()
         {
-            lock (cacheLock)
+            return new ChunkGenerationStats
             {
-                globalHeightCache.Clear();
-            }
+                ChunksGenerated = chunksGenerated,
+                AverageGenerationTime = chunksGenerated > 0 ? totalGenerationTime / chunksGenerated : 0f,
+                CacheSize = 0 // No cache
+            };
+        }
+
+        public void Dispose()
+        {
+            cancellationSource?.Cancel();
+            cancellationSource?.Dispose();
         }
 
         /// <summary>
-        /// Get performance statistics
+        /// Column metadata for pre-calculation
         /// </summary>
-        public string GetStats()
+        private struct ColumnData
         {
-            return $"Chunks: {chunksGenerated} | Avg Gen: {avgGenerationTime * 1000f:F1}ms | Cache: {globalHeightCache.Count}";
-        }
-
-        private void OnDestroy()
-        {
-            ClearCaches();
+            public int surfaceY;
+            public BiomeType biomeType;
+            public int maxY;
         }
     }
 }

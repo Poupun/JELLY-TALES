@@ -24,7 +24,9 @@
       "WebFetch(domain:stackoverflow.com)",
       "WebFetch(domain:discussions.unity.com)",
       "Bash(claude mcp:*)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(del:*)",
+      "Bash(\"D:\\Unity\\6000.0.33f1\\Editor\\Data\\MonoBleedingEdge\\bin\\mono.exe\" --version)"
     ],
     "deny": [
       "mcp__UnityMCP__manage_editor"

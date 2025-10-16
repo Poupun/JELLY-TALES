@@ -2109,12 +2109,17 @@ MonoBehaviour:
   oceanCoverage: 0.161
   seaLevel: 104
   maxOceanDepth: 40
+  oceanPlainsNoiseScale: 0.008
+  maxBiomeSize: 125
   plainsTreeDensity: 0.062
   plainsPlantDensity: 0.15
-  forestCoverage: 0
+  forestCoverage: 0.242
   forestNoiseScale: 0.015
   forestTreeDensity: 3
   forestPlantDensity: 0.35
+  enableBiomeBlending: 1
+  biomeBlendDistance: 12
+  terrainBlendSmoothness: 0.7
   debugSpawnOnBeach: 0
   debugAlwaysTeleportToBeach: 0
   debugBeachSearchRadius: 8
